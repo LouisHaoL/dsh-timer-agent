@@ -65,8 +65,11 @@ Then **restart `dsh web`**; the sidebar「定时任务」entry confirms it is li
 pnpm install
 pnpm run build      # lib/index.js (host) + lib/client.js (browser, CSS inlined)
 pnpm run typecheck
-pnpm run smoke-test # 23 end-to-end smoke checks
+pnpm test           # 49 behavioral E2E checks (fake host faces, no dsh runtime)
+pnpm run smoke-test # static structure smoke (23 checks)
 ```
+
+The E2E suite covers: cron parsing and next-run computation (local-time semantics), ledger atomic writes and corrupted-file degradation, at-most-once due firing, pinned-session resume, `turn/end` success/failure settlement (failure reason lands verbatim), skip-while-running, disabled schedules never firing, the manual-run fast path, workdir propagation, every `timer_agent` tool action (incl. invalid-argument rejection), and HTTP route CRUD + run + loopback/same-origin fencing + 400s on bad input.
 
 ## Mapping to hermes-agent cron
 

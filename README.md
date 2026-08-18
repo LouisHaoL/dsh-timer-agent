@@ -63,8 +63,11 @@ dsh plugin --profile web add link:<本目录绝对路径>
 pnpm install
 pnpm run build      # lib/index.js(host) + lib/client.js(浏览器,CSS 已内联)
 pnpm run typecheck
-pnpm run smoke-test # 23 项端到端冒烟
+pnpm test           # 49 项行为级 E2E(fake host faces,无需 dsh 运行时)
+pnpm run smoke-test # 静态结构冒烟(23 项)
 ```
+
+E2E 覆盖:cron 解析与下次运行计算(本地时间语义)、台账原子写与损坏降级、at-most-once 调度触发、钉住会话 resume、`turn/end` 成功/失败结算(含失败原因入账)、运行中拒绝重复触发、禁用调度不触发、手动触发通道、workdir 传递、`timer_agent` 工具全动作(含非法参数拒绝)、HTTP 路由 CRUD + run + 回环/同源防线 + 非法输入 400。
 
 ## 与 hermes-agent cron 的对应关系
 
