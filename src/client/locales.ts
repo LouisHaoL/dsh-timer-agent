@@ -1,0 +1,169 @@
+/**
+ * Timer-agent copy: zh-first dictionaries with an English fallback, selected
+ * by the document language. Kept dependency-free so the DOM-injected entry
+ * row and the standalone board tree share one tiny lookup.
+ */
+
+/** zh dictionary (key-set source of truth). */
+export const zh = {
+  'entry.label': '定时任务',
+  'board.title': '定时任务 × Agent',
+  'board.close': '返回对话',
+  'board.new': '新建任务',
+  'board.search': '筛选任务…',
+  'board.empty': '这里还没有任务',
+  'board.runs': '次执行',
+  'board.updated': '更新于',
+  'board.created': '创建于',
+  'board.hint': '到点自动驱动真实 agent 会话执行；灵感来自 hermes-agent cron',
+  'new.title': '标题',
+  'new.titlePlaceholder': '一句话描述要定时做什么',
+  'new.description': '描述',
+  'new.descriptionPlaceholder': '补充背景、范围与验收（可选）',
+  'new.prompt': '执行 Prompt',
+  'new.promptPlaceholder': '发给 agent 的完整指令（留空则使用标题）',
+  'new.target': '目标会话',
+  'new.target.workspace': '项目（工作区）',
+  'new.target.workspaceAny': '默认工作区',
+  'new.target.session': '会话',
+  'new.target.sessionNew': '每次执行新建会话',
+  'new.target.hint': '项目和会话都留空时，在默认工作空间发起新对话',
+  'new.schedule': '定时（可选）',
+  'new.schedule.enable': '启用定时执行',
+  'new.schedule.cron': 'Cron 表达式',
+  'new.submit': '创建',
+  'new.cancel': '取消',
+  'new.required': '标题不能为空',
+  'detail.title': '任务详情',
+  'detail.close': '关闭',
+  'detail.prompt': '执行 Prompt',
+  'detail.description': '描述',
+  'detail.execution': '执行记录',
+  'detail.noExecution': '尚未执行',
+  'detail.run': '立即执行',
+  'detail.rerun': '再次执行',
+  'detail.delete': '删除',
+  'detail.reset': '重置为待机',
+  'detail.viewSession': '查看会话',
+  'detail.executionStarted': '已启动',
+  'detail.executionEnded': '已结束',
+  'detail.result.succeeded': '成功',
+  'detail.result.failed': '失败',
+  'detail.result.cancelled': '已取消',
+  'detail.result.running': '进行中',
+  'detail.target.session': '指定会话',
+  'detail.target.new': '新建会话',
+  'detail.target.default': '默认工作空间 · 新会话',
+  'detail.target.workspace': '项目',
+  'delete.title': '删除任务',
+  'delete.confirm': '确定删除「{name}」吗？删除后不可恢复。',
+  'delete.ok': '删除',
+  'delete.cancel': '取消',
+  'detail.schedule': '定时运行',
+  'detail.schedule.enable': '启用定时执行',
+  'detail.schedule.cron': 'Cron 表达式',
+  'detail.schedule.presets': '预设',
+  'detail.schedule.preset.daily9': '每天 09:00',
+  'detail.schedule.preset.hourly': '每小时',
+  'detail.schedule.preset.tenMin': '每 10 分钟',
+  'detail.schedule.preset.weeklyMon9': '每周一 09:00',
+  'detail.schedule.nextRun': '下次运行',
+  'detail.schedule.lastTriggered': '上次触发',
+  'detail.schedule.invalid': 'Cron 表达式无效',
+  'detail.schedule.notScheduled': '尚未排程',
+  'detail.schedule.dueSoon': '即将运行',
+  'card.scheduled': '定时',
+  'time.justNow': '刚刚',
+} satisfies Record<string, string>
+
+/** en dictionary, complete against the zh key set. */
+export const en: Record<keyof typeof zh, string> = {
+  'entry.label': 'Timed Jobs',
+  'board.title': 'Timed Jobs × Agent',
+  'board.close': 'Back to chat',
+  'board.new': 'New Job',
+  'board.search': 'Filter jobs…',
+  'board.empty': 'No jobs here yet',
+  'board.runs': 'runs',
+  'board.updated': 'Updated',
+  'board.created': 'Created',
+  'board.hint': 'Fires real agent sessions on schedule; inspired by hermes-agent cron',
+  'new.title': 'Title',
+  'new.titlePlaceholder': 'What should run, in one line',
+  'new.description': 'Description',
+  'new.descriptionPlaceholder': 'Background, scope, acceptance criteria (optional)',
+  'new.prompt': 'Run Prompt',
+  'new.promptPlaceholder': 'The full instruction sent to the agent (title is used when blank)',
+  'new.target': 'Session Target',
+  'new.target.workspace': 'Project (workspace)',
+  'new.target.workspaceAny': 'Default workspace',
+  'new.target.session': 'Session',
+  'new.target.sessionNew': 'New session per run',
+  'new.target.hint': 'With both blank, each run starts a new conversation in the default workspace',
+  'new.schedule': 'Schedule (optional)',
+  'new.schedule.enable': 'Enable scheduled runs',
+  'new.schedule.cron': 'Cron expression',
+  'new.submit': 'Create',
+  'new.cancel': 'Cancel',
+  'new.required': 'Title is required',
+  'detail.title': 'Job Detail',
+  'detail.close': 'Close',
+  'detail.prompt': 'Run Prompt',
+  'detail.description': 'Description',
+  'detail.execution': 'Execution History',
+  'detail.noExecution': 'Not executed yet',
+  'detail.run': 'Run Now',
+  'detail.rerun': 'Run Again',
+  'detail.delete': 'Delete',
+  'detail.reset': 'Reset to Idle',
+  'detail.viewSession': 'View Session',
+  'detail.executionStarted': 'Started',
+  'detail.executionEnded': 'Ended',
+  'detail.result.succeeded': 'Succeeded',
+  'detail.result.failed': 'Failed',
+  'detail.result.cancelled': 'Cancelled',
+  'detail.result.running': 'Running',
+  'detail.target.session': 'Pinned session',
+  'detail.target.new': 'New session',
+  'detail.target.default': 'Default workspace · new session',
+  'detail.target.workspace': 'Project',
+  'delete.title': 'Delete Job',
+  'delete.confirm': 'Delete "{name}"? This cannot be undone.',
+  'delete.ok': 'Delete',
+  'delete.cancel': 'Cancel',
+  'detail.schedule': 'Scheduled Runs',
+  'detail.schedule.enable': 'Enable scheduled runs',
+  'detail.schedule.cron': 'Cron expression',
+  'detail.schedule.presets': 'Presets',
+  'detail.schedule.preset.daily9': 'Every day 09:00',
+  'detail.schedule.preset.hourly': 'Every hour',
+  'detail.schedule.preset.tenMin': 'Every 10 minutes',
+  'detail.schedule.preset.weeklyMon9': 'Every Monday 09:00',
+  'detail.schedule.nextRun': 'Next run',
+  'detail.schedule.lastTriggered': 'Last triggered',
+  'detail.schedule.invalid': 'Invalid cron expression',
+  'detail.schedule.notScheduled': 'Not scheduled yet',
+  'detail.schedule.dueSoon': 'Due soon',
+  'card.scheduled': 'scheduled',
+  'time.justNow': 'just now',
+}
+
+/** The dictionary key union. */
+export type TimerAgentKey = keyof typeof zh
+
+/** Active dictionary, picked by the document language at call time. */
+export function dictionary(): Record<TimerAgentKey, string> {
+  const lang = typeof document !== 'undefined' ? document.documentElement.lang : 'zh'
+  return lang.toLowerCase().startsWith('en') ? en : zh
+}
+
+/** Translate a key with optional {name} template params. */
+export function t(key: TimerAgentKey, params?: Record<string, string>): string {
+  let text: string = dictionary()[key]
+  if (params !== undefined) {
+    for (const [name, value] of Object.entries(params)) {
+      text = text.replaceAll(`{${name}}`, value)
+    }
+  }
+  return text
+}
