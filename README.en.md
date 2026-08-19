@@ -1,6 +1,6 @@
 # dsh-timer-agent — Scheduled-jobs × AI Agent engine for DSH
 
-English | [中文](./README.md)
+[中文](./README.md) | English
 
 A [DeepSeek Harness (DSH)](https://github.com/) Web GUI plugin: a **host-resident scheduled-jobs engine** built after studying the cron system of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) and following its "timer ↔ agent coordination" design. It is live the moment the `dsh web` service starts — **it keeps firing with the GUI page closed**.
 
@@ -97,4 +97,4 @@ The E2E suite covers: cron parsing and next-run computation (local-time semantic
 
 ## License
 
-Apache-2.0
+[MIT](./LICENSE)

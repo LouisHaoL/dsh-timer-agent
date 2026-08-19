@@ -1,6 +1,6 @@
 # dsh-timer-agent — DSH 定时任务 × AI Agent 引擎
 
-[English](./README.en.md) | 中文
+中文 | [English](./README.en.md)
 
 一个 [DeepSeek Harness (DSH)](https://github.com/) Web GUI 插件:调研 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) 的 cron 系统后,按其「定时器 ↔ Agent 协同」思路实现的 **host 常驻定时任务引擎**——`dsh web` 服务启动即生效,**GUI 页面关闭也照常触发**。
 
@@ -95,4 +95,4 @@ E2E 覆盖:cron 解析与下次运行计算(本地时间语义)、台账原子�
 
 ## License
 
-Apache-2.0
+[MIT](./LICENSE)

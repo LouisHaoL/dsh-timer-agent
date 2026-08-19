@@ -221,6 +221,16 @@ html[data-dsh-timeragent-active]:not([data-dsh-ssh-active]):not([data-dsh-taskbo
   border-color: rgba(212, 87, 78, 0.5);
 }
 
+.statusBadge[data-status='archived'] {
+  color: var(--dsw-alias-label-tertiary);
+  border-color: var(--dsw-alias-border-l2);
+  opacity: 0.75;
+}
+
+.rowCard[data-status='archived'] .rowTitle {
+  color: var(--dsw-alias-label-tertiary);
+}
+
 .statusDot {
   width: 6px;
   height: 6px;

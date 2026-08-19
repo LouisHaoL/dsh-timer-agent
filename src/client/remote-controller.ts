@@ -110,6 +110,7 @@ export class RemoteBoardController {
       description: input.description,
       prompt: input.prompt,
       target: input.target,
+      ...input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection },
       ...(cron !== undefined ? { cron } : {}),
     })
     if (response === undefined || response.error !== undefined) return undefined
@@ -140,6 +141,16 @@ export class RemoteBoardController {
 
   async resetJob(id: string): Promise<void> {
     await this.fetchJson('PATCH', `/api/dsh-timer-agent/jobs?id=${encodeURIComponent(id)}`, { resetStatus: true })
+    await this.refresh()
+  }
+
+  async archiveJob(id: string): Promise<void> {
+    await this.fetchJson('PATCH', `/api/dsh-timer-agent/jobs?id=${encodeURIComponent(id)}`, { archived: true })
+    await this.refresh()
+  }
+
+  async restartJob(id: string): Promise<void> {
+    await this.fetchJson('PATCH', `/api/dsh-timer-agent/jobs?id=${encodeURIComponent(id)}`, { restart: true })
     await this.refresh()
   }
 

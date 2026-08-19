@@ -10,6 +10,7 @@
  * - DELETE /api/dsh-timer-agent/jobs?id=…     → remove
  * - POST   /api/dsh-timer-agent/jobs/run?id=… → fire now (background)
  * - GET    /api/dsh-timer-agent/workspaces    → host workspace registry {id,path}
+ * - GET    /api/dsh-timer-agent/model-options → default model + provider/model catalog
  *
  * @module dsh-timer-agent/routes
  */
@@ -18,7 +19,7 @@ import type {
   HostPluginContext, HostRoute, NodeIncomingMessage, NodeServerResponse,
 } from './contracts.ts'
 import { isValidCron, nextRunAtMs } from '../core/schedule.ts'
-import { createJob, withSchedule, withStatus, type JobRecord } from '../core/jobs.ts'
+import { createJob, withSchedule, withStatus, type JobModelSelection, type JobRecord } from '../core/jobs.ts'
 import type { HostJobStore } from './store.ts'
 import type { TimerRunner } from './runner.ts'
 
@@ -88,6 +89,17 @@ function queryParam(req: NodeIncomingMessage, key: string): string | undefined {
   return undefined
 }
 
+/** Validate an unknown body value as a model selection; undefined = follow default. */
+function readModelSelection(value: unknown): JobModelSelection | 'invalid' | undefined {
+  if (value === null || value === undefined) return undefined
+  if (typeof value !== 'object') return 'invalid'
+  const record = value as Record<string, unknown>
+  const provider = typeof record.provider === 'string' ? record.provider.trim() : ''
+  const model = typeof record.model === 'string' ? record.model.trim() : ''
+  if (provider === '' || model === '') return 'invalid'
+  return { provider, model }
+}
+
 /** Dependencies the routes close over. */
 export interface RouteDeps {
   store: HostJobStore
@@ -133,6 +145,11 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
           return
         }
         const target = (typeof body.target === 'object' && body.target !== null ? body.target : {}) as Record<string, unknown>
+        const modelSelection = readModelSelection(body.modelSelection)
+        if (modelSelection === 'invalid') {
+          writeJson(res, 400, { error: 'modelSelection must be { provider, model }' })
+          return
+        }
         let job = createJob({
           title,
           description: typeof body.description === 'string' ? body.description : '',
@@ -141,6 +158,7 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
             workdir: typeof target.workdir === 'string' ? target.workdir.trim() : '',
             sessionId: typeof target.sessionId === 'string' ? target.sessionId.trim() : '',
           },
+          ...modelSelection === undefined ? {} : { modelSelection },
         }, deps.now(), randomUUID())
         if (armCron) {
           job = withSchedule(job, { enabled: true, cron, nextRunAt: nextRunAtMs(cron, deps.now()) }, deps.now())
@@ -167,6 +185,13 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
           if (typeof body.title === 'string' && body.title.trim() !== '') next = { ...next, title: body.title.trim() }
           if (typeof body.description === 'string') next = { ...next, description: body.description }
           if (typeof body.prompt === 'string') next = { ...next, prompt: body.prompt }
+          if ('modelSelection' in body) {
+            const modelSelection = readModelSelection(body.modelSelection)
+            if (modelSelection === 'invalid') return undefined
+            if (modelSelection === undefined) next = { ...next }
+            else next = { ...next, modelSelection }
+            if (modelSelection === undefined) delete (next as { modelSelection?: JobModelSelection }).modelSelection
+          }
           if (typeof body.target === 'object' && body.target !== null) {
             const target = body.target as Record<string, unknown>
             next = {
@@ -191,6 +216,20 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
             next = withSchedule(next, { enabled: false, nextRunAt: undefined }, deps.now())
           }
           if (body.resetStatus === true) next = withStatus(next, 'idle', deps.now())
+          // Archive freezes the job (no schedule fires, no manual runs); a
+          // running job refuses the archive until its execution settles.
+          if (body.archived === true && next.status !== 'running') {
+            next = withStatus(next, 'archived', deps.now())
+          }
+          // Restart un-archives: back to idle, and an armed schedule gets a
+          // fresh nextRunAt so the cron picks up from now.
+          if (body.restart === true && next.status === 'archived') {
+            next = withStatus(next, 'idle', deps.now())
+            const cron = next.schedule?.cron ?? ''
+            if (next.schedule?.enabled === true && isValidCron(cron)) {
+              next = withSchedule(next, { enabled: true, nextRunAt: nextRunAtMs(cron, deps.now()) }, deps.now())
+            }
+          }
           return { jobs: jobs.map(candidate => (candidate.id === id ? next : candidate)), result: next }
         })
         if (updated === undefined) {
@@ -267,5 +306,48 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
     },
   }
 
-  return [jobsRoute, runRoute, workspacesRoute]
+  const modelOptionsRoute: HostRoute = {
+    kind: 'exact',
+    path: '/api/dsh-timer-agent/model-options',
+    handler: async (req, res) => {
+      if (!isLoopbackRequest(req)) {
+        writeJson(res, 403, { error: 'forbidden: loopback-only' })
+        return
+      }
+      if (req.method !== 'GET') {
+        writeJson(res, 405, { error: `method not allowed: ${req.method}` })
+        return
+      }
+      // The deployment default (agentDefaultModel) plus the live provider/
+      // model catalog over every registered route; per-provider failures ride
+      // `failures` without failing the sound groups (api-proxy precedent).
+      let fallback: { provider: string, model: string } | undefined
+      try {
+        fallback = deps.ctx.get('agentDefaultModel')?.currentSelection()
+      } catch {
+        fallback = undefined
+      }
+      const llm = deps.ctx.get('llm')
+      const groups: Array<{ id: string, name: string, models: Array<{ id: string, name: string }> }> = []
+      const failures: Array<{ id: string, name: string, message: string }> = []
+      if (llm !== undefined) {
+        await Promise.all(llm.listProviders().map(async provider => {
+          try {
+            const models = await llm.listModels(provider.id)
+            const entries = models.map(model => ({ id: model.id, name: model.name }))
+            if (entries.length > 0) groups.push({ id: provider.id, name: provider.name, models: entries })
+          } catch (error: unknown) {
+            failures.push({
+              id: provider.id,
+              name: provider.name,
+              message: error instanceof Error ? error.message : String(error),
+            })
+          }
+        }))
+      }
+      writeJson(res, 200, { default: fallback, groups, failures })
+    },
+  }
+
+  return [jobsRoute, runRoute, workspacesRoute, modelOptionsRoute]
 }

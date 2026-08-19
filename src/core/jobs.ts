@@ -12,8 +12,11 @@
  * unit-testable in isolation.
  */
 
-/** Job lifecycle status. */
-export type JobStatus = 'idle' | 'running' | 'done' | 'failed'
+/**
+ * Job lifecycle status. 'archived' freezes the job: the ticker skips its
+ * schedule and manual runs are refused until it is restarted (back to idle).
+ */
+export type JobStatus = 'idle' | 'running' | 'done' | 'failed' | 'archived'
 
 /**
  * One real execution attempt: the run's own id, the dsh session that ran it
@@ -73,6 +76,18 @@ export interface SessionTarget {
   sessionId: string
 }
 
+/**
+ * Per-job model selection: which provider/model a run uses. Absent → the
+ * default resolution (a pinned session keeps its own selection; a new
+ * session falls back to the deployment `agentDefaultModel`).
+ */
+export interface JobModelSelection {
+  /** Registered provider route. */
+  provider: string
+  /** Provider-owned model id. */
+  model: string
+}
+
 /** One scheduled job on the board. */
 export interface JobRecord {
   /** Stable job id (uuid). */
@@ -87,6 +102,8 @@ export interface JobRecord {
   status: JobStatus
   /** Session targeting (see {@link SessionTarget}). */
   target: SessionTarget
+  /** Model override for runs (absent → default resolution). */
+  modelSelection?: JobModelSelection
   /** Creation instant (ms epoch). */
   createdAt: number
   /** Last mutation instant (ms epoch). */
@@ -109,13 +126,15 @@ export interface NewJobInput {
   description: string
   prompt: string
   target: SessionTarget
+  /** Model override for runs (absent → default resolution). */
+  modelSelection?: JobModelSelection
 }
 
 /** Statuses the runner may settle a card into from 'running'. */
 export const RUNNER_SETTLE_STATUSES: readonly JobStatus[] = ['done', 'failed']
 
 /** All valid statuses (closed union guard). */
-export const ALL_STATUSES: readonly JobStatus[] = ['idle', 'running', 'done', 'failed']
+export const ALL_STATUSES: readonly JobStatus[] = ['idle', 'running', 'done', 'failed', 'archived']
 
 /** Brand an unknown string as a status; undefined when it is not one. */
 export function isJobStatus(value: unknown): value is JobStatus {
@@ -131,6 +150,7 @@ export function createJob(input: NewJobInput, now: number, id: string): JobRecor
     prompt: input.prompt.trim(),
     status: 'idle',
     target: { ...input.target },
+    ...input.modelSelection === undefined ? {} : { modelSelection: { ...input.modelSelection } },
     createdAt: now,
     updatedAt: now,
     executions: [],

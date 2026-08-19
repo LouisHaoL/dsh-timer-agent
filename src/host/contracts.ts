@@ -60,6 +60,14 @@ export interface HostAgentRegistry {
   /** Reopen a persisted session as a live agent, replaying its history. */
   resume(options: {
     readonly resumeSessionId: string
+    /** Per-agent overrides (provider, model, …); omit → keep the session's selection. */
+    readonly agentOptions?: {
+      readonly provider?: string
+      readonly model?: string
+      readonly reasoningEffort?: string
+    }
+    /** Pre-publication composition of the agent's scoped world (preset join). */
+    readonly setup?: (agentCtx: object) => void | Promise<void>
   }): Promise<HostAgentHandle>
   create(options: {
     readonly sessionId: string
@@ -67,7 +75,81 @@ export interface HostAgentRegistry {
       readonly cwd?: string
       readonly agentPreset?: string
     }
+    /** Per-agent options (provider, model, …) — omitting model starves `{{model}}`. */
+    readonly agentOptions?: {
+      readonly provider?: string
+      readonly model?: string
+      readonly reasoningEffort?: string
+    }
+    /** Pre-publication composition of the agent's scoped world (preset join). */
+    readonly setup?: (agentCtx: object) => void | Promise<void>
   }): Promise<HostAgentHandle>
+}
+
+/**
+ * The `agentPresets` service (subset of the host `AgentPresets`): the preset
+ * roster whose standing mounts give an agent its tools, prompt sections, and
+ * skills. `mount` must run inside the agent factory's `setup` hook, where a
+ * failure rolls the whole creation back.
+ */
+export interface HostAgentPresets {
+  /** Resolve one preset by id (undefined = the deployment default). */
+  resolve(id?: string): Promise<{ readonly id: string }>
+  /** Join one agent's scope to a preset's standing composition. */
+  mount(agentCtx: object, id?: string): Promise<unknown>
+}
+
+/**
+ * The `sessionPersistence` service (subset): cold session inspection used to
+ * rebuild a resumed session's recorded preset selection.
+ */
+export interface HostSessionPersistence {
+  /** Read one session's header and event log without resuming it. */
+  inspect(sessionId: string): Promise<{
+    readonly meta: { readonly agentPreset?: string }
+    readonly events: ReadonlyArray<{ readonly type: string, readonly data?: { readonly agentPreset?: string } }>
+  }>
+}
+
+/**
+ * The `agentDefaultModel` service (subset of the host
+ * `AgentDefaultModelConfig`): the deployment-wide default model selection a
+ * session-less entry point uses when the target carries no selection.
+ */
+export interface HostAgentDefaultModel {
+  /** Detached provider/model (plus optional reasoning effort) selection. */
+  currentSelection(): {
+    readonly provider: string
+    readonly model: string
+    readonly reasoningEffort?: string
+  }
+}
+
+/** One provider row from the `llm` service's route registry. */
+export interface HostLlmProvider {
+  /** Provider route key. */
+  readonly id: string
+  /** Provider display name. */
+  readonly name: string
+}
+
+/** One model a provider advertises (subset of `LlmModelInfo`). */
+export interface HostLlmModel {
+  /** Provider-owned model id. */
+  readonly id: string
+  /** Human-readable model name. */
+  readonly name: string
+}
+
+/**
+ * The `llm` service (subset of the host LLM registry): the provider/model
+ * catalog for selection surfaces.
+ */
+export interface HostLlm {
+  /** Every registered provider route. */
+  listProviders(): readonly HostLlmProvider[]
+  /** One provider's advertised models (throws per-provider on failure). */
+  listModels(provider: string): Promise<readonly HostLlmModel[]>
 }
 
 /** One workspace record (subset of the host `Workspace` entity). */
@@ -174,6 +256,14 @@ declare module '@deepseek-ai/cordis' {
 export interface HostPluginContext {
   agents: HostAgentRegistry
   webServer: HostWebServer
+  /** The host default-model service, when mounted ('agentDefaultModel'). */
+  get(service: 'agentDefaultModel'): HostAgentDefaultModel | undefined
+  /** The host LLM registry, when mounted ('llm'). */
+  get(service: 'llm'): HostLlm | undefined
+  /** The preset roster, when mounted ('agentPresets'). */
+  get(service: 'agentPresets'): HostAgentPresets | undefined
+  /** The session persistence service, when mounted ('sessionPersistence'). */
+  get(service: 'sessionPersistence'): HostSessionPersistence | undefined
   get(service: string): unknown
   on(event: 'session/event', listener: (session: HostSession, event: HostSessionEvent) => void): () => void
   effect(setup: () => () => void, label?: string): void

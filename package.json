@@ -75,7 +75,7 @@
     "src",
     "cordis.patch.yml"
   ],
-  "license": "Apache-2.0",
+  "license": "MIT",
   "scripts": {
     "build": "tsdown && node scripts/inline-css.mjs",
     "watch": "tsdown --watch",

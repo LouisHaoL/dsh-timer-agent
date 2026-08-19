@@ -9,7 +9,7 @@
  * conversation (hermes context_from semantics).
  */
 import { useEffect, useMemo, useState } from 'react'
-import type { TargetGroup } from '../target-options.ts'
+import type { ModelOptions, TargetGroup } from '../target-options.ts'
 import type { BoardControllerFace } from '../controller-face.ts'
 import { isValidCron } from '../../core/schedule.ts'
 import { t, type TimerAgentKey } from '../locales.ts'
@@ -44,14 +44,40 @@ function leavesOf(group: TargetGroup): Leaf[] {
   ]
 }
 
+/** One selectable model option (flattened across provider groups). */
+interface ModelLeaf {
+  key: string
+  label: string
+  provider: string
+  model: string
+}
+
+/** Flatten provider groups into selectable model leaves. */
+function modelLeavesOf(options: ModelOptions): ModelLeaf[] {
+  const leaves: ModelLeaf[] = []
+  for (const group of options.groups) {
+    for (const model of group.models) {
+      leaves.push({
+        key: `${group.id}\u0000${model.id}`,
+        label: `${group.name} · ${model.name}`,
+        provider: group.id,
+        model: model.id,
+      })
+    }
+  }
+  return leaves
+}
+
 /** New-job form overlay. */
-export function NewJobModal({ controller, targetOptions, onClose }: { controller: BoardControllerFace; targetOptions: () => Promise<TargetGroup[]>; onClose: () => void }) {
+export function NewJobModal({ controller, targetOptions, modelOptions, onClose }: { controller: BoardControllerFace; targetOptions: () => Promise<TargetGroup[]>; modelOptions: () => Promise<ModelOptions>; onClose: () => void }) {
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [prompt, setPrompt] = useState('')
   const [groups, setGroups] = useState<TargetGroup[]>([{ key: 'default', name: '默认工作空间', workdir: '', sessions: [] }])
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set<string>())
   const [selectedKey, setSelectedKey] = useState('default:new')
+  const [modelOptionsState, setModelOptionsState] = useState<ModelOptions>({ groups: [] })
+  const [modelKey, setModelKey] = useState('')
   const [cronEnabled, setCronEnabled] = useState(false)
   const [cron, setCron] = useState('0 9 * * *')
   const [error, setError] = useState<string | undefined>(undefined)
@@ -64,8 +90,11 @@ export function NewJobModal({ controller, targetOptions, onClose }: { controller
         // All groups start collapsed; the user expands what they need.
       }
     }).catch(() => undefined)
+    void modelOptions().then(next => {
+      if (alive) setModelOptionsState(next)
+    }).catch(() => undefined)
     return () => { alive = false }
-  }, [targetOptions])
+  }, [targetOptions, modelOptions])
 
   /** All leaves across groups, for resolving the current selection. */
   const leafOf = useMemo(() => {
@@ -75,6 +104,14 @@ export function NewJobModal({ controller, targetOptions, onClose }: { controller
   }, [groups])
 
   const selected = leafOf.get(selectedKey) ?? { key: 'default:new', label: '', workdir: '', sessionId: '' }
+
+  /** Flattened model picker options; key '' = follow the default resolution. */
+  const modelLeaves = useMemo(() => modelLeavesOf(modelOptionsState), [modelOptionsState])
+  const modelDefaultLabel = selected.sessionId !== ''
+    ? t('new.model.followSession')
+    : modelOptionsState.default !== undefined
+      ? `${modelOptionsState.default.provider} · ${modelOptionsState.default.model}（${t('new.model.followDefault')}）`
+      : t('new.model.followDefault')
 
   const toggleGroup = (key: string): void => {
     setExpanded(prev => {
@@ -88,11 +125,13 @@ export function NewJobModal({ controller, targetOptions, onClose }: { controller
   const submit = (): void => {
     // Stage the cron so createJob arms the schedule server-side in one call.
     controller.stageCreateCron?.(cronEnabled && isValidCron(cron) ? cron : undefined)
+    const model = modelLeaves.find(leaf => leaf.key === modelKey)
     const created = controller.createJob({
       title,
       description,
       prompt,
       target: { workdir: selected.workdir, sessionId: selected.sessionId },
+      ...model === undefined ? {} : { modelSelection: { provider: model.provider, model: model.model } },
     })
     void Promise.resolve(created).then(job => {
       if (job === undefined) {
@@ -188,6 +227,21 @@ export function NewJobModal({ controller, targetOptions, onClose }: { controller
           </div>
           <span className={css.fieldHint}>{t('new.target.hint')}</span>
         </div>
+
+        <label className={css.field}>
+          <span className={css.fieldLabel}>{t('new.model')}</span>
+          <select
+            className={css.input}
+            value={modelKey}
+            aria-label={t('new.model')}
+            onChange={event => { setModelKey(event.target.value) }}
+          >
+            <option value="">{modelDefaultLabel}</option>
+            {modelLeaves.map(leaf => (
+              <option key={leaf.key} value={leaf.key}>{leaf.label}</option>
+            ))}
+          </select>
+        </label>
 
         <div className={css.field}>
           <label className={css.scheduleToggle}>

@@ -39,6 +39,17 @@ function slug(title: string): string {
   return base === '' ? 'job' : base.slice(0, 32)
 }
 
+/** Safely read a selection off the default-model service (undefined on throw). */
+function trySelection(defaults: { currentSelection(): { provider: string, model: string } }): { provider: string, model: string } | undefined {
+  try {
+    const selection = defaults.currentSelection()
+    if (selection.provider === '' || selection.model === '') return undefined
+    return selection
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * The live agent for a pinned id, wrapped as a non-owning handle (dispose is
  * a no-op — the host, e.g. the open GUI session, owns its lifetime). Returns
@@ -127,9 +138,10 @@ export class TimerRunner {
     const jobs = await this.store.load()
     let fired = 0
     for (const job of jobs) {
-      // 1. due schedule
+      // 1. due schedule (archived jobs never fire)
       const schedule = job.schedule
-      if (schedule !== undefined && schedule.enabled && schedule.nextRunAt !== undefined && schedule.nextRunAt <= this.now()) {
+      if (job.status !== 'archived'
+        && schedule !== undefined && schedule.enabled && schedule.nextRunAt !== undefined && schedule.nextRunAt <= this.now()) {
         const next = nextRunAtMs(schedule.cron, schedule.nextRunAt)
         if (await this.requestRun(job.id)) {
           fired += 1
@@ -171,7 +183,7 @@ export class TimerRunner {
     if (this.disposed) return false
     const outcome = await this.store.mutate(current => {
       const job = current.find(candidate => candidate.id === jobId)
-      if (job === undefined || job.status === 'running') return undefined
+      if (job === undefined || job.status === 'running' || job.status === 'archived') return undefined
       const targeting = job.target.sessionId !== '' ? 'specified-session' : 'new-session'
       const { job: next, execution } = startExecution(job, this.now(), randomUUID(), targeting)
       if (extraPrompt !== undefined && extraPrompt.trim() !== '') {
@@ -228,8 +240,25 @@ export class TimerRunner {
       if (live !== undefined) return live
       const cached = this.pinnedHandles.get(pinnedId)
       if (cached !== undefined) return cached
+      // Rebuild the session's recorded preset composition for the resume
+      // (api-proxy agentFor precedent): a cold resume without the join runs
+      // the session on host-plane tools instead of the composition its
+      // history was produced under. Failure to compose degrades to a bare
+      // resume rather than abandoning the pinned conversation.
+      let resumeSetup: ((agentCtx: object) => Promise<void>) | undefined
       try {
-        const handle = await agents.resume({ resumeSessionId: pinnedId })
+        resumeSetup = await this.presetSetupFor(pinnedId)
+      } catch (error) {
+        console.warn('[dsh-timer-agent] preset composition for pinned session failed; resuming bare:', error)
+      }
+      try {
+        // An explicit per-job model selection overrides the session's own;
+        // without one the resume keeps the session's persisted selection.
+        const handle = await agents.resume({
+          resumeSessionId: pinnedId,
+          ...job.modelSelection === undefined ? {} : { agentOptions: { ...job.modelSelection } },
+          ...resumeSetup === undefined ? {} : { setup: resumeSetup },
+        })
         this.pinnedHandles.set(pinnedId, handle)
         return handle
       } catch (error) {
@@ -244,12 +273,88 @@ export class TimerRunner {
     }
     const agents: HostAgentRegistry = this.ctx.agents
     const sessionId = `timer-${slug(job.title)}-${new Date(this.now()).toISOString().replace(/[-:TZ.]/g, '').slice(0, 14)}`
+    // A fresh session has no persisted model selection, and the deployment
+    // persona template references `{{model}}` strictly: creating without
+    // agentOptions starves that variable and the first turn fails before any
+    // work starts. Resolution order: the job's own model selection, else the
+    // deployment agentDefaultModel (mirroring the GUI/headless entry points).
+    const defaults = this.ctx.get('agentDefaultModel')
+    let agentOptions: { provider?: string, model?: string, reasoningEffort?: string } | undefined
+    const seed = job.modelSelection ?? (defaults === undefined ? undefined : trySelection(defaults))
+    if (seed !== undefined) {
+      agentOptions = { provider: seed.provider, model: seed.model }
+    }
+    // Join the deployment's default agent preset: without it the new session
+    // runs on the empty global layer — no tool packages, no preset prompt
+    // sections. A broken default preset fails the run loudly (creation rolls
+    // back with the resolver's error), matching the GUI's behavior.
+    let presetMeta: { agentPreset: string } | undefined
+    let presetSetup: ((agentCtx: object) => Promise<void>) | undefined
+    ;({ presetMeta, presetSetup } = await this.composeDefaultPreset())
     const handle = await agents.create({
       sessionId,
-      ...(job.target.workdir !== '' ? { meta: { cwd: job.target.workdir } } : {}),
+      ...(agentOptions !== undefined ? { agentOptions } : {}),
+      ...(job.target.workdir !== ''
+        ? { meta: { cwd: job.target.workdir, ...presetMeta } }
+        : presetMeta === undefined ? {} : { meta: presetMeta }),
+      ...(presetSetup === undefined ? {} : { setup: presetSetup }),
     })
     await this.attachWorkspace(sessionId, job.target.workdir).catch(() => undefined)
     return handle
+  }
+
+  /**
+   * Compose a NEW session's default preset: resolve the roster default, record
+   * it on the session header, and join the agent's scope to its standing
+   * mount inside the factory setup hook (api-proxy composeAgent precedent —
+   * the join decides the agent's tools, prompt sections, and skills, so a
+   * session created bare resolves them against the empty global layer).
+   * Undefined parts when no roster is composed; a broken default preset
+   * rejects so creation rolls back with the resolver's error.
+   */
+  private async composeDefaultPreset(): Promise<{
+    presetMeta: { agentPreset: string } | undefined
+    presetSetup: ((agentCtx: object) => Promise<void>) | undefined
+  }> {
+    const presets = this.ctx.get('agentPresets')
+    if (presets === undefined) return { presetMeta: undefined, presetSetup: undefined }
+    const resolvedId = (await presets.resolve()).id
+    return {
+      presetMeta: { agentPreset: resolvedId },
+      presetSetup: async agentCtx => { await presets.mount(agentCtx, resolvedId) },
+    }
+  }
+
+  /**
+   * Compose a RESUMED session's recorded preset: the last
+   * `agent-preset/selected` event wins over the creation header
+   * (`resolveSessionPreset` semantics), read through cold persistence
+   * inspection; a session that recorded none falls back to the roster
+   * default. Rejection means "compose nothing" — the caller resumes bare
+   * rather than abandoning the pinned conversation.
+   */
+  private async presetSetupFor(sessionId: string): Promise<((agentCtx: object) => Promise<void>) | undefined> {
+    const presets = this.ctx.get('agentPresets')
+    if (presets === undefined) return undefined
+    let recorded: string | undefined
+    try {
+      const persistence = this.ctx.get('sessionPersistence')
+      const inspected = persistence === undefined ? undefined : await persistence.inspect(sessionId)
+      if (inspected !== undefined) {
+        for (let index = inspected.events.length - 1; index >= 0; index -= 1) {
+          const event = inspected.events[index]
+          if (event?.type === 'agent-preset/selected' && typeof event.data?.agentPreset === 'string') {
+            recorded = event.data.agentPreset
+            break
+          }
+        }
+        recorded = recorded ?? inspected.meta.agentPreset
+      }
+    } catch {
+      recorded = undefined
+    }
+    const resolvedId = (await presets.resolve(recorded)).id
+    return async agentCtx => { await presets.mount(agentCtx, resolvedId) }
   }
 
   /** Best-effort workspace grouping so the run lands under the right project in the GUI. */

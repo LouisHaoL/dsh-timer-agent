@@ -66,7 +66,7 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
     description: [
       'Manage scheduled timer jobs that fire real agent sessions on a cron schedule (the dsh-timer-agent engine; the same jobs appear in the web GUI「定时任务」panel).',
       "action='create' schedules a new job (requires schedule + prompt; prompt must be self-contained — scheduled runs get no current-chat context unless session is pinned).",
-      "action='list' shows all jobs; action='update' edits prompt/schedule/name; action='pause'/'resume' arms/disarms the schedule; action='remove' deletes; action='run' fires immediately in the background (returns at once; the run happens in its own session).",
+      "action='list' shows all jobs; action='update' edits prompt/schedule/name; action='pause'/'resume' arms/disarms the schedule; action='archive' freezes a job (no schedule fires, no manual runs) and action='restart' un-archives it back to idle; action='remove' deletes; action='run' fires immediately in the background (returns at once; the run happens in its own session).",
       "schedule syntax: 5-field cron like '0 9 * * *' (min hour day month weekday).",
       "session targeting: leave both workdir and session empty → each run starts a NEW conversation in the default workspace; pass session=<existing session id> → every run continues that conversation (continuity); pass workdir=<absolute project path> → new sessions run inside that project.",
       'Scheduled runs execute autonomously with no user present — prompts must not ask questions.',
@@ -74,11 +74,11 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
     parameters: {
       action: {
         type: 'string',
-        description: "One of: create, list, update, pause, resume, remove, run. Required.",
+        description: 'One of: create, list, update, pause, resume, archive, restart, remove, run. Required.',
       },
       job_id: {
         type: 'string',
-        description: 'Job id (required for update/pause/resume/remove/run). Get ids from action=list; never guess.',
+        description: 'Job id (required for update/pause/resume/archive/restart/remove/run). Get ids from action=list; never guess.',
       },
       prompt: {
         type: 'string',
@@ -231,6 +231,35 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
         })
         if (updated === undefined) return { kind: 'reset', error: `job ${id} not found` }
         return { kind: 'reset', job: summarize(updated) }
+      }
+
+      // Archive freezes (no schedule fires, no manual runs); restart un-archives.
+      if (action === 'archive' || action === 'restart') {
+        const updated = await deps.store.mutate(jobs => {
+          const job = jobs.find(candidate => candidate.id === id)
+          if (job === undefined) return undefined
+          if (action === 'archive') {
+            if (job.status === 'running') return undefined
+            const next = withStatus(job, 'archived', now())
+            return { jobs: jobs.map(candidate => (candidate.id === id ? next : candidate)), result: next }
+          }
+          if (job.status !== 'archived') return undefined
+          let next = withStatus(job, 'idle', now())
+          const cron = next.schedule?.cron ?? ''
+          if (next.schedule?.enabled === true && isValidCron(cron)) {
+            next = withSchedule(next, { enabled: true, nextRunAt: nextRunAtMs(cron, now()) }, now())
+          }
+          return { jobs: jobs.map(candidate => (candidate.id === id ? next : candidate)), result: next }
+        })
+        if (updated === undefined) {
+          return {
+            kind: action,
+            error: action === 'archive'
+              ? `job ${id} not found or currently running`
+              : `job ${id} not found or not archived`,
+          }
+        }
+        return { kind: action, job: summarize(updated) }
       }
 
       return { kind: action, error: `unknown action: ${action}` }

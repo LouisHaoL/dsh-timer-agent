@@ -20,6 +20,10 @@ export interface BoardControllerFace {
   updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt'>> & { target?: SessionTarget }): Promise<void> | void
   deleteJob(id: string): Promise<void> | void
   resetJob(id: string): Promise<void> | void
+  /** Freeze a job: no schedule fires, no manual runs (host refuses while running). */
+  archiveJob(id: string): Promise<void> | void
+  /** Un-archive a job back to idle; an armed schedule gets a fresh nextRunAt. */
+  restartJob(id: string): Promise<void> | void
   setSchedule(id: string, patch: { enabled?: boolean; cron?: string }): boolean | Promise<boolean>
   applyScheduleNextRun(id: string, nextRunAt: number | undefined, lastTriggeredAt: number | undefined): Promise<void> | void
   openSession(sessionId: string): void

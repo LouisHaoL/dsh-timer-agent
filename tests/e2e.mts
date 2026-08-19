@@ -318,7 +318,7 @@ section('HTTP routes: handlers + loopback fence')
   let now = Date.UTC(2026, 0, 1)
   const runner = new TimerRunner({ ctx: host.ctx, store: s, now: () => now })
   const routes = makeRoutes({ store: s, runner, ctx: host.ctx, now: () => now })
-  check('three routes composed', routes.length === 3)
+  check('four routes composed', routes.length === 4)
 
   const jobsRoute = routes.find(r => r.path.endsWith('/jobs'))!
   const runRoute = routes.find(r => r.path.endsWith('/jobs/run'))!
@@ -368,6 +368,25 @@ section('HTTP routes: handlers + loopback fence')
   await runRoute.handler(makeReq('POST', `/api/dsh-timer-agent/jobs/run?id=${id}`), ran.res)
   check('POST /run 鈫?202', ran.status === 202, `${ran.status}`)
 
+  // Archive/restart on a separate (not running) job
+  const archCreated = makeRes()
+  await jobsRoute.handler(makeReq('POST', '/api/dsh-timer-agent/jobs', { title: 'arch-job', cron: '0 9 * * *' }), archCreated.res)
+  const archId = (JSON.parse(archCreated.body).job as JobRecord).id
+  const archived = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${archId}`, { archived: true }), archived.res)
+  check('PATCH archived 鈫?200 status=archived', archived.status === 200 && (JSON.parse(archived.body).job as JobRecord).status === 'archived')
+  const runArchived = makeRes()
+  await runRoute.handler(makeReq('POST', `/api/dsh-timer-agent/jobs/run?id=${archId}`), runArchived.res)
+  check('run of archived job 鈫?409', runArchived.status === 409, `${runArchived.status}`)
+
+  // Restart → back to idle + schedule re-armed
+  const restarted = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${archId}`, { restart: true }), restarted.res)
+  const restartedJob = JSON.parse(restarted.body).job as JobRecord
+  check('PATCH restart 鈫?200 status=idle + nextRunAt set', restarted.status === 200
+    && restartedJob.status === 'idle' && restartedJob.schedule?.nextRunAt !== undefined)
+  await jobsRoute.handler(makeReq('DELETE', `/api/dsh-timer-agent/jobs?id=${archId}`), makeRes().res)
+
   // DELETE
   const deleted = makeRes()
   await jobsRoute.handler(makeReq('DELETE', `/api/dsh-timer-agent/jobs?id=${id}`), deleted.res)
@@ -396,6 +415,29 @@ section('HTTP routes: handlers + loopback fence')
   const ws = makeRes()
   await wsRoute.handler(makeReq('GET', '/api/dsh-timer-agent/workspaces'), ws.res)
   check('GET /workspaces 鈫?200 (empty without registry)', ws.status === 200)
+
+  // Model-options route (llm/agentDefaultModel absent → empty catalog, still 200)
+  const moRoute = routes.find(r => r.path.endsWith('/model-options'))!
+  const mo = makeRes()
+  await moRoute.handler(makeReq('GET', '/api/dsh-timer-agent/model-options'), mo.res)
+  const moBody = JSON.parse(mo.body) as { default?: unknown, groups: unknown[] }
+  check('GET /model-options 鈫?200 (empty without services)', mo.status === 200 && moBody.groups.length === 0)
+
+  // POST /jobs with a model selection persists it; an invalid one is rejected
+  const withModel = makeRes()
+  await jobsRoute.handler(makeReq('POST', '/api/dsh-timer-agent/jobs', {
+    title: 'model job',
+    target: { workdir: '', sessionId: '' },
+    modelSelection: { provider: 'p1', model: 'm1' },
+  }), withModel.res)
+  const withModelBody = JSON.parse(withModel.body) as { job?: { modelSelection?: { provider: string, model: string } } }
+  check('POST /jobs persists modelSelection', withModel.status === 201 && withModelBody.job?.modelSelection?.model === 'm1')
+  const badModel = makeRes()
+  await jobsRoute.handler(makeReq('POST', '/api/dsh-timer-agent/jobs', {
+    title: 'bad model',
+    modelSelection: { provider: '', model: 'm1' },
+  }), badModel.res)
+  check('POST /jobs rejects invalid modelSelection', badModel.status === 400)
 }
 
 // ============================================================================

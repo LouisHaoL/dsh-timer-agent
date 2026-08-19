@@ -106,6 +106,39 @@ function sessionRows(ctx: ClientContext): SessionRow[] {
   }
 }
 
+/** One provider and its advertised models (the model picker data source). */
+export interface ModelOptionGroup {
+  /** Provider route key. */
+  id: string
+  /** Provider display name. */
+  name: string
+  /** Models in provider-preferred order. */
+  models: Array<{ id: string, name: string }>
+}
+
+/** Host model-options payload: the deployment default plus the catalog. */
+export interface ModelOptions {
+  /** Deployment agentDefaultModel selection, when the service answers. */
+  default?: { provider: string, model: string }
+  /** Successfully loaded provider groups. */
+  groups: ModelOptionGroup[]
+}
+
+/** Fetch host model options (empty groups when the route is unreachable). */
+export async function listModelOptions(): Promise<ModelOptions> {
+  try {
+    const response = await fetch('/api/dsh-timer-agent/model-options')
+    if (!response.ok) return { groups: [] }
+    const body = await response.json() as Partial<ModelOptions>
+    return {
+      ...body.default === undefined ? {} : { default: body.default },
+      groups: Array.isArray(body.groups) ? body.groups : [],
+    }
+  } catch {
+    return { groups: [] }
+  }
+}
+
 /** Last non-empty path segment (both separators), for short labels. */
 function pathBasename(path: string): string {
   const name = path.split(/[\\/]/).filter(Boolean).pop()

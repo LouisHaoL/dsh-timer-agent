@@ -10,7 +10,7 @@ import type { ExecutionRecord, JobRecord } from '../../core/jobs.ts'
 import type { BoardControllerFace } from '../controller-face.ts'
 import { t, type TimerAgentKey } from '../locales.ts'
 import css from '../board.module.css'
-import { formatTime } from './TimerBoard.tsx'
+import { formatTime, STATUS_LABEL_KEY } from './TimerBoard.tsx'
 
 /** Execution outcome → locale key. */
 const RESULT_KEY: Record<NonNullable<ExecutionRecord['result']>, TimerAgentKey> = {
@@ -188,6 +188,7 @@ function Confirm({ message, confirmLabel, onConfirm, onCancel }: {
 export function JobDetail({ controller, job }: { controller: BoardControllerFace; job: JobRecord }) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const running = job.status === 'running'
+  const archived = job.status === 'archived'
 
   // Keep the overlay in sync if the job record changes underneath.
   const [latest, setLatest] = useState(job)
@@ -201,7 +202,7 @@ export function JobDetail({ controller, job }: { controller: BoardControllerFace
           <h2 className={css.detailTitle}>{current.title}</h2>
           <span className={css.statusBadge} data-status={current.status}>
             <span className={css.statusDot} aria-hidden="true" />
-            {current.status === 'idle' ? '待机' : current.status === 'running' ? t('detail.result.running') : current.status === 'done' ? t('detail.result.succeeded') : t('detail.result.failed')}
+            {t(STATUS_LABEL_KEY[current.status])}
           </span>
           <button
             type="button"
@@ -250,10 +251,13 @@ export function JobDetail({ controller, job }: { controller: BoardControllerFace
         </div>
 
         <footer className={css.detailFooter}>
+          {archived && (
+            <span className={css.detailText}>{t('detail.archivedHint')}</span>
+          )}
           <button
             type="button"
             className={css.primaryButton}
-            disabled={running}
+            disabled={running || archived}
             onClick={() => {
               // Running kicks off a real agent session; close the detail so
               // the whole board stays visible while the job executes.
@@ -263,7 +267,26 @@ export function JobDetail({ controller, job }: { controller: BoardControllerFace
           >
             {current.executions.length === 0 ? t('detail.run') : t('detail.rerun')}
           </button>
-          {!running && current.status !== 'idle' && (
+          {archived ? (
+            <button
+              type="button"
+              className={css.primaryButton}
+              onClick={() => { void controller.restartJob(current.id) }}
+            >
+              {t('detail.restart')}
+            </button>
+          ) : (
+            !running && (
+              <button
+                type="button"
+                className={css.ghostButton}
+                onClick={() => { void controller.archiveJob(current.id) }}
+              >
+                {t('detail.archive')}
+              </button>
+            )
+          )}
+          {!running && !archived && current.status !== 'idle' && (
             <button
               type="button"
               className={css.ghostButton}

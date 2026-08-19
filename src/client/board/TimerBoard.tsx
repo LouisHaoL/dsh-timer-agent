@@ -6,7 +6,7 @@
 import { useEffect, useState } from 'react'
 import { selectedJobOf, type ControllerSnapshot } from '../../core/controller.ts'
 import type { JobRecord, JobStatus } from '../../core/jobs.ts'
-import type { TargetGroup } from '../target-options.ts'
+import type { TargetGroup, ModelOptions } from '../target-options.ts'
 import type { BoardControllerFace } from '../controller-face.ts'
 import { t, type TimerAgentKey } from '../locales.ts'
 import css from '../board.module.css'
@@ -19,14 +19,16 @@ export const STATUS_KEY: Record<JobStatus, TimerAgentKey> = {
   running: 'detail.result.running',
   done: 'detail.result.succeeded',
   failed: 'detail.result.failed',
+  archived: 'detail.status.archived',
 }
 
-/** Status → display label key. */
-const STATUS_LABEL_KEY: Record<JobStatus, TimerAgentKey> = {
-  idle: 'board.empty',
+/** Status → display label key (shared with JobDetail). */
+export const STATUS_LABEL_KEY: Record<JobStatus, TimerAgentKey> = {
+  idle: 'detail.status.idle',
   running: 'detail.result.running',
   done: 'detail.result.succeeded',
   failed: 'detail.result.failed',
+  archived: 'detail.status.archived',
 }
 
 /** Case-insensitive title/description/prompt match. */
@@ -39,7 +41,7 @@ function matchesFilter(job: JobRecord, filter: string): boolean {
 }
 
 /** Board component; subscribes to the controller snapshot. */
-export function TimerBoard({ controller, targetOptions }: { controller: BoardControllerFace; targetOptions: () => Promise<TargetGroup[]> }) {
+export function TimerBoard({ controller, targetOptions, modelOptions }: { controller: BoardControllerFace; targetOptions: () => Promise<TargetGroup[]>; modelOptions: () => Promise<ModelOptions> }) {
   const [snapshot, setSnapshot] = useState(controller.getSnapshot())
   useEffect(
     () => controller.subscribe(() => setSnapshot(controller.getSnapshot())),
@@ -94,7 +96,7 @@ export function TimerBoard({ controller, targetOptions }: { controller: BoardCon
             <span className={css.rowMeta}>
               <span className={css.statusBadge} data-status={job.status}>
                 <span className={css.statusDot} aria-hidden="true" />
-                {job.status === 'idle' ? '待机' : t(STATUS_LABEL_KEY[job.status])}
+                {t(STATUS_LABEL_KEY[job.status])}
               </span>
               {job.schedule?.enabled === true && (
                 <span
@@ -124,6 +126,7 @@ export function TimerBoard({ controller, targetOptions }: { controller: BoardCon
         <NewJobModal
           controller={controller}
           targetOptions={targetOptions}
+          modelOptions={modelOptions}
           onClose={() => { setShowNew(false) }}
         />
       )}
