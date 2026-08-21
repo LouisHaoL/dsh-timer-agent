@@ -363,6 +363,15 @@ section('HTTP routes: handlers + loopback fence')
   await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${id}`, { prompt: 'p2' }), patched.res)
   check('PATCH /jobs 鈫?200 with new prompt', patched.status === 200 && (JSON.parse(patched.body).job as JobRecord).prompt === 'p2')
 
+  // PATCH cron on an ARMED schedule rolls nextRunAt to the new expression
+  const cronEdited = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${id}`, { cron: '0 10 * * *' }), cronEdited.res)
+  const cronEditedJob = JSON.parse(cronEdited.body).job as JobRecord
+  check('PATCH cron on armed schedule rolls nextRunAt', cronEdited.status === 200
+    && cronEditedJob.schedule?.cron === '0 10 * * *'
+    && cronEditedJob.schedule?.nextRunAt === nextRunAtMs('0 10 * * *', now),
+  `${cronEdited.status} ${cronEditedJob.schedule?.nextRunAt}`)
+
   // POST run
   const ran = makeRes()
   await runRoute.handler(makeReq('POST', `/api/dsh-timer-agent/jobs/run?id=${id}`), ran.res)

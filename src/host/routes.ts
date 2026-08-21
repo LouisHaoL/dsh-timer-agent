@@ -206,6 +206,12 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
             const cron = body.cron.trim()
             if (!isValidCron(cron)) return undefined
             next = withSchedule(next, { cron }, deps.now())
+            // An armed schedule must pick up the NEW cron immediately: roll
+            // nextRunAt from now so the displayed/effective next run matches
+            // the edited expression instead of the stale one.
+            if (next.schedule?.enabled === true) {
+              next = withSchedule(next, { enabled: true, nextRunAt: nextRunAtMs(cron, deps.now()) }, deps.now())
+            }
           }
           if (body.scheduleEnabled === true) {
             const cron = next.schedule?.cron ?? ''

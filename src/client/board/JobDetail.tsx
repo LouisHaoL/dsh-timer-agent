@@ -3,14 +3,21 @@
  * execution history — and the only place execution can be triggered. Also
  * offers delete (with confirmation) and a jump to the execution's session
  * transcript.
+ *
+ * Editing is job-level and manual: one 编辑 button puts the WHOLE job
+ * (prompt + session target + cron schedule) into a draft state, and a single
+ * 保存 in the footer persists everything in one PATCH. No field saves on
+ * its own while editing.
  */
-import { useEffect, useState } from 'react'
-import { isValidCron } from '../../core/schedule.ts'
+import { useEffect, useMemo, useState } from 'react'
+import { isValidCron, nextRunAtMs } from '../../core/schedule.ts'
 import type { ExecutionRecord, JobRecord } from '../../core/jobs.ts'
+import type { TargetGroup } from '../target-options.ts'
 import type { BoardControllerFace } from '../controller-face.ts'
 import { t, type TimerAgentKey } from '../locales.ts'
 import css from '../board.module.css'
 import { formatTime, STATUS_LABEL_KEY } from './TimerBoard.tsx'
+import { DEFAULT_TARGET_GROUPS, leavesOf, TargetTree } from './NewJobModal.tsx'
 
 /** Execution outcome → locale key. */
 const RESULT_KEY: Record<NonNullable<ExecutionRecord['result']>, TimerAgentKey> = {
@@ -58,110 +65,30 @@ const SCHEDULE_PRESETS: ReadonlyArray<{ cron: string; label: TimerAgentKey }> = 
   { cron: '0 9 * * 1', label: 'detail.schedule.preset.weeklyMon9' },
 ]
 
-/** The scheduled-runs editor: enable toggle, cron input + presets, next-run info. */
-function ScheduleSection({ controller, job }: { controller: BoardControllerFace; job: JobRecord }) {
-  const schedule = job.schedule
-  const [cron, setCron] = useState(schedule?.cron ?? '0 9 * * *')
-  const [enabled, setEnabled] = useState(schedule?.enabled ?? false)
-  const [nextRunAt, setNextRunAt] = useState<number | undefined>(schedule?.nextRunAt)
-  const [lastTriggeredAt, setLastTriggeredAt] = useState<number | undefined>(schedule?.lastTriggeredAt)
-  const [error, setError] = useState<string | undefined>(undefined)
-
-  // Keep the editor in sync when the job record changes underneath.
-  useEffect(() => {
-    setCron(schedule?.cron ?? '0 9 * * *')
-    setEnabled(schedule?.enabled ?? false)
-    setNextRunAt(schedule?.nextRunAt)
-    setLastTriggeredAt(schedule?.lastTriggeredAt)
-    setError(undefined)
-  }, [job.id, schedule?.enabled, schedule?.cron, schedule?.nextRunAt, schedule?.lastTriggeredAt])
-
-  /** Validate + persist the current cron text (Enter or blur). */
-  const saveCron = (value: string): void => {
-    const trimmed = value.trim()
-    setCron(trimmed)
-    if (trimmed === '' || !isValidCron(trimmed)) {
-      setError(t('detail.schedule.invalid'))
-      return
-    }
-    setError(undefined)
-    controller.setSchedule(job.id, { cron: trimmed })
-  }
-
-  /** Arm/disarm the schedule (arming first persists the edited cron). */
-  const toggleEnabled = (next: boolean): void => {
-    const trimmed = cron.trim()
-    if (next && (trimmed === '' || !isValidCron(trimmed))) {
-      setError(t('detail.schedule.invalid'))
-      return
-    }
-    setError(undefined)
-    if (next && trimmed !== schedule?.cron) controller.setSchedule(job.id, { cron: trimmed })
-    if (controller.setSchedule(job.id, { enabled: next })) setEnabled(next)
-  }
-
-  const applyPreset = (preset: string): void => {
-    if (preset === '') return
-    setCron(preset)
-    setError(undefined)
-    controller.setSchedule(job.id, { cron: preset })
-  }
-
-  const nextLabel = !enabled || nextRunAt === undefined
-    ? t('detail.schedule.notScheduled')
-    : nextRunAt <= Date.now()
-      ? t('detail.schedule.dueSoon')
-      : new Date(nextRunAt).toLocaleString()
-  const lastLabel = lastTriggeredAt === undefined ? '—' : new Date(lastTriggeredAt).toLocaleString()
-
-  return (
-    <section className={css.detailSection}>
-      <h4>{t('detail.schedule')}</h4>
-      <label className={css.scheduleToggle}>
-        <input
-          type="checkbox"
-          checked={enabled}
-          onChange={event => { toggleEnabled(event.target.checked) }}
-        />
-        <span>{t('detail.schedule.enable')}</span>
-      </label>
-      <div className={css.scheduleRow}>
-        <input
-          className={`${css.input} ${css.scheduleInput}${error !== undefined ? ` ${css.scheduleInputInvalid}` : ''}`}
-          value={cron}
-          placeholder="0 9 * * *"
-          spellCheck={false}
-          aria-label={t('detail.schedule.cron')}
-          onChange={event => { setCron(event.target.value); setError(undefined) }}
-          onBlur={() => { saveCron(cron) }}
-          onKeyDown={event => { if (event.key === 'Enter') saveCron(cron) }}
-        />
-        <select
-          className={`${css.input} ${css.schedulePreset}`}
-          value=""
-          aria-label={t('detail.schedule.presets')}
-          onChange={event => { applyPreset(event.target.value) }}
-        >
-          <option value="">{t('detail.schedule.presets')}…</option>
-          {SCHEDULE_PRESETS.map(preset => (
-            <option key={preset.cron} value={preset.cron}>{t(preset.label)}</option>
-          ))}
-        </select>
-      </div>
-      {error !== undefined && <p className={css.formError}>{error}</p>}
-      <p className={css.scheduleMeta}>
-        {t('detail.schedule.nextRun')} {nextLabel}
-        {' · '}{t('detail.schedule.lastTriggered')} {lastLabel}
-      </p>
-    </section>
-  )
-}
-
 /** Human label for a job's session target. */
 function targetLabel(job: JobRecord): string {
   if (job.target.sessionId !== '') return `${t('detail.target.session')} (${job.target.sessionId})`
   if (job.target.workdir !== '') return `${job.target.workdir} · ${t('detail.target.new')}`
   return t('detail.target.default')
+}
+
+/** Normalize a path for matching (case-fold, forward slashes, no trailing). */
+function normPath(path: string): string {
+  let p = path.replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase()
+  if (p.length >= 2 && p[1] === ':') p = p[0].toUpperCase() + p.slice(1)
+  return p
+}
+
+/** Resolve the tree-leaf key matching a job's current target (undefined = none). */
+function keyForTarget(groups: TargetGroup[], job: JobRecord): string | undefined {
+  for (const group of groups) {
+    if (normPath(group.workdir) !== normPath(job.target.workdir)) continue
+    if (job.target.sessionId === '') return `${group.key}:new`
+    if (group.sessions.some(session => session.id === job.target.sessionId)) {
+      return `${group.key}:ss:${job.target.sessionId}`
+    }
+  }
+  return undefined
 }
 
 /** Confirm-dialog shape (inline; the board owns no shared dialog). */
@@ -185,7 +112,7 @@ function Confirm({ message, confirmLabel, onConfirm, onCancel }: {
 }
 
 /** Job detail overlay. */
-export function JobDetail({ controller, job }: { controller: BoardControllerFace; job: JobRecord }) {
+export function JobDetail({ controller, job, targetOptions }: { controller: BoardControllerFace; job: JobRecord; targetOptions: () => Promise<TargetGroup[]> }) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const running = job.status === 'running'
   const archived = job.status === 'archived'
@@ -194,6 +121,109 @@ export function JobDetail({ controller, job }: { controller: BoardControllerFace
   const [latest, setLatest] = useState(job)
   useEffect(() => { setLatest(job) }, [job])
   const current = latest
+
+  const canEdit = !running && !archived
+
+  // --- unified edit state (drafts; nothing persists until 保存) ---------------
+  const [editing, setEditing] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [promptDraft, setPromptDraft] = useState(current.prompt)
+  const [groups, setGroups] = useState<TargetGroup[]>(DEFAULT_TARGET_GROUPS)
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set<string>())
+  const [selectedKey, setSelectedKey] = useState('')
+  const [cronDraft, setCronDraft] = useState(current.schedule?.cron ?? '0 9 * * *')
+  const [scheduleEnabledDraft, setScheduleEnabledDraft] = useState(current.schedule?.enabled ?? false)
+  const [error, setError] = useState<string | undefined>(undefined)
+
+  /** All leaves across groups, for resolving the current selection. */
+  const leafMap = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof leavesOf>>()
+    for (const group of groups) map.set(group.key, leavesOf(group))
+    return map
+  }, [groups])
+
+  /** The leaf the selection resolves to (falls back to the job's target). */
+  const selectedTarget = useMemo(() => {
+    for (const leaves of leafMap.values()) {
+      const hit = leaves.find(leaf => leaf.key === selectedKey)
+      if (hit !== undefined) return { workdir: hit.workdir, sessionId: hit.sessionId }
+    }
+    return { workdir: current.target.workdir, sessionId: current.target.sessionId }
+  }, [leafMap, selectedKey, current.target.workdir, current.target.sessionId])
+
+  /** Enter edit mode: stage drafts from the current record + load the tree. */
+  const startEdit = (): void => {
+    setPromptDraft(current.prompt)
+    setCronDraft(current.schedule?.cron ?? '0 9 * * *')
+    setScheduleEnabledDraft(current.schedule?.enabled ?? false)
+    setError(undefined)
+    setSaving(false)
+    void targetOptions().then(next => {
+      const loaded = next.length > 0 ? next : DEFAULT_TARGET_GROUPS
+      setGroups(loaded)
+      const key = keyForTarget(loaded, current)
+      if (key !== undefined) {
+        setSelectedKey(key)
+        // Auto-expand the group holding the current target for context.
+        const group = loaded.find(g => key === `${g.key}:new` || key.startsWith(`${g.key}:ss:`))
+        setExpanded(new Set<string>(group !== undefined ? [group.key] : []))
+      } else {
+        setSelectedKey('')
+      }
+    }).catch(() => undefined)
+    setEditing(true)
+  }
+
+  const cancelEdit = (): void => {
+    setEditing(false)
+    setSaving(false)
+    setError(undefined)
+  }
+
+  /** One PATCH: prompt + target + cron + armed state, all at once. */
+  const saveEdit = (): void => {
+    const cron = cronDraft.trim()
+    if (cron === '' ? scheduleEnabledDraft : !isValidCron(cron)) {
+      setError(t('detail.schedule.invalid'))
+      return
+    }
+    setError(undefined)
+    setSaving(true)
+    void Promise.resolve(controller.updateJob(current.id, {
+      prompt: promptDraft,
+      target: { workdir: selectedTarget.workdir, sessionId: selectedTarget.sessionId },
+      cron,
+      scheduleEnabled: scheduleEnabledDraft,
+    })).then(() => {
+      setEditing(false)
+      setSaving(false)
+    }).catch(() => { setSaving(false) })
+  }
+
+  const toggleGroup = (key: string): void => {
+    setExpanded(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  // Read-only schedule labels.
+  const enabled = current.schedule?.enabled ?? false
+  const nextRunAt = current.schedule?.nextRunAt
+  const nextLabel = !enabled || nextRunAt === undefined
+    ? t('detail.schedule.notScheduled')
+    : nextRunAt <= Date.now()
+      ? t('detail.schedule.dueSoon')
+      : new Date(nextRunAt).toLocaleString()
+  const lastLabel = current.schedule?.lastTriggeredAt === undefined
+    ? '—'
+    : new Date(current.schedule.lastTriggeredAt).toLocaleString()
+  const draftCronValid = cronDraft.trim() !== '' && isValidCron(cronDraft.trim())
+  const draftNextRun = scheduleEnabledDraft && draftCronValid
+    ? nextRunAtMs(cronDraft.trim(), Date.now())
+    : undefined
 
   return (
     <div className={css.modalBackdrop} onMouseDown={event => { if (event.target === event.currentTarget) controller.closeJob() }}>
@@ -215,22 +245,105 @@ export function JobDetail({ controller, job }: { controller: BoardControllerFace
         </header>
 
         <div className={css.detailBody}>
+          {!editing && (
+            <section className={css.detailSection}>
+              <h4>{t('detail.description')}</h4>
+              <p className={css.detailText}>{current.description !== '' ? current.description : '—'}</p>
+            </section>
+          )}
+
           <section className={css.detailSection}>
-            <h4>{t('detail.description')}</h4>
-            <p className={css.detailText}>{current.description !== '' ? current.description : '—'}</p>
+            <h4>{t('detail.prompt')}</h4>
+            {editing ? (
+              <textarea
+                className={css.input}
+                style={{ width: '100%', minHeight: '160px', resize: 'vertical', fontFamily: 'inherit', lineHeight: '1.5', boxSizing: 'border-box' }}
+                value={promptDraft}
+                placeholder={t('new.promptPlaceholder')}
+                aria-label={t('detail.prompt')}
+                onChange={event => { setPromptDraft(event.target.value) }}
+              />
+            ) : (
+              <pre className={css.promptBlock}>{current.prompt !== '' ? current.prompt : current.title}</pre>
+            )}
           </section>
 
           <section className={css.detailSection}>
             <h4>{t('new.target')}</h4>
-            <p className={css.detailText}>{targetLabel(current)}</p>
+            {editing ? (
+              <>
+                <TargetTree
+                  groups={groups}
+                  expanded={expanded}
+                  selectedKey={selectedKey}
+                  onToggle={toggleGroup}
+                  onSelect={setSelectedKey}
+                />
+                <span className={css.fieldHint}>{t('new.target.hint')}</span>
+              </>
+            ) : (
+              <p className={css.detailText}>{targetLabel(current)}</p>
+            )}
           </section>
 
           <section className={css.detailSection}>
-            <h4>{t('detail.prompt')}</h4>
-            <pre className={css.promptBlock}>{current.prompt !== '' ? current.prompt : current.title}</pre>
+            <h4>{t('detail.schedule')}</h4>
+            {editing ? (
+              <>
+                <label className={css.scheduleToggle}>
+                  <input
+                    type="checkbox"
+                    checked={scheduleEnabledDraft}
+                    onChange={event => { setScheduleEnabledDraft(event.target.checked); setError(undefined) }}
+                  />
+                  <span>{t('detail.schedule.enable')}</span>
+                </label>
+                <div className={css.scheduleRow}>
+                  <input
+                    className={`${css.input} ${css.scheduleInput}${!draftCronValid ? ` ${css.scheduleInputInvalid}` : ''}`}
+                    value={cronDraft}
+                    placeholder="0 9 * * *"
+                    spellCheck={false}
+                    aria-label={t('detail.schedule.cron')}
+                    onChange={event => { setCronDraft(event.target.value); setError(undefined) }}
+                  />
+                  <select
+                    className={`${css.input} ${css.schedulePreset}`}
+                    value=""
+                    aria-label={t('detail.schedule.presets')}
+                    onChange={event => {
+                      const preset = event.target.value
+                      if (preset !== '') {
+                        setCronDraft(preset)
+                        setError(undefined)
+                      }
+                    }}
+                  >
+                    <option value="">{t('detail.schedule.presets')}…</option>
+                    {SCHEDULE_PRESETS.map(preset => (
+                      <option key={preset.cron} value={preset.cron}>{t(preset.label)}</option>
+                    ))}
+                  </select>
+                </div>
+                {scheduleEnabledDraft && (
+                  <p className={css.scheduleMeta}>
+                    {t('detail.schedule.nextRun')}{' '}
+                    {draftNextRun === undefined ? t('detail.schedule.notScheduled') : new Date(draftNextRun).toLocaleString()}
+                  </p>
+                )}
+              </>
+            ) : (
+              <>
+                <p className={css.detailText}>
+                  {enabled ? (current.schedule?.cron ?? '') : t('detail.schedule.notScheduled')}
+                </p>
+                <p className={css.scheduleMeta}>
+                  {t('detail.schedule.nextRun')} {nextLabel}
+                  {' · '}{t('detail.schedule.lastTriggered')} {lastLabel}
+                </p>
+              </>
+            )}
           </section>
-
-          <ScheduleSection controller={controller} job={current} />
 
           <section className={css.detailSection}>
             <h4>{t('detail.execution')}</h4>
@@ -250,58 +363,92 @@ export function JobDetail({ controller, job }: { controller: BoardControllerFace
           </section>
         </div>
 
+        {editing && error !== undefined && <p className={css.formError}>{error}</p>}
+
         <footer className={css.detailFooter}>
-          {archived && (
-            <span className={css.detailText}>{t('detail.archivedHint')}</span>
-          )}
-          <button
-            type="button"
-            className={css.primaryButton}
-            disabled={running || archived}
-            onClick={() => {
-              // Running kicks off a real agent session; close the detail so
-              // the whole board stays visible while the job executes.
-              controller.closeJob()
-              void controller.rerunJob(current.id)
-            }}
-          >
-            {current.executions.length === 0 ? t('detail.run') : t('detail.rerun')}
-          </button>
-          {archived ? (
-            <button
-              type="button"
-              className={css.primaryButton}
-              onClick={() => { void controller.restartJob(current.id) }}
-            >
-              {t('detail.restart')}
-            </button>
-          ) : (
-            !running && (
+          {editing ? (
+            <>
               <button
                 type="button"
                 className={css.ghostButton}
-                onClick={() => { void controller.archiveJob(current.id) }}
+                disabled={saving}
+                onClick={cancelEdit}
               >
-                {t('detail.archive')}
+                {t('detail.editCancel')}
               </button>
-            )
+              <button
+                type="button"
+                className={css.primaryButton}
+                disabled={saving}
+                onClick={saveEdit}
+              >
+                {t('detail.save')}
+              </button>
+            </>
+          ) : (
+            <>
+              {archived && (
+                <span className={css.detailText}>{t('detail.archivedHint')}</span>
+              )}
+              {canEdit && (
+                <button
+                  type="button"
+                  className={css.ghostButton}
+                  onClick={startEdit}
+                >
+                  {t('detail.edit')}
+                </button>
+              )}
+              <button
+                type="button"
+                className={css.primaryButton}
+                disabled={running || archived}
+                onClick={() => {
+                  // Running kicks off a real agent session; close the detail so
+                  // the whole board stays visible while the job executes.
+                  controller.closeJob()
+                  void controller.rerunJob(current.id)
+                }}
+              >
+                {current.executions.length === 0 ? t('detail.run') : t('detail.rerun')}
+              </button>
+              {archived ? (
+                <button
+                  type="button"
+                  className={css.primaryButton}
+                  onClick={() => { void controller.restartJob(current.id) }}
+                >
+                  {t('detail.restart')}
+                </button>
+              ) : (
+                !running && (
+                  <button
+                    type="button"
+                    className={css.ghostButton}
+                    onClick={() => { void controller.archiveJob(current.id) }}
+                  >
+                    {t('detail.archive')}
+                  </button>
+                )
+              )}
+              {!running && !archived && current.status !== 'idle' && (
+                <button
+                  type="button"
+                  className={css.ghostButton}
+                  onClick={() => { controller.resetJob(current.id) }}
+                >
+                  {t('detail.reset')}
+                </button>
+              )}
+              <button
+                type="button"
+                className={css.dangerButton}
+                onClick={() => { setConfirmDelete(true) }}
+              >
+                {t('detail.delete')}
+              </button>
+            </>
           )}
-          {!running && !archived && current.status !== 'idle' && (
-            <button
-              type="button"
-              className={css.ghostButton}
-              onClick={() => { controller.resetJob(current.id) }}
-            >
-              {t('detail.reset')}
-            </button>
-          )}
-          <button
-            type="button"
-            className={css.dangerButton}
-            onClick={() => { setConfirmDelete(true) }}
-          >
-            {t('detail.delete')}
-          </button>
           <span className={css.detailMeta}>
             {t('board.created')} {formatTime(current.createdAt)}
           </span>

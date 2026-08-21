@@ -16,7 +16,7 @@ import { t, type TimerAgentKey } from '../locales.ts'
 import css from '../board.module.css'
 
 /** One selectable leaf inside a group. */
-interface Leaf {
+export interface Leaf {
   key: string
   label: string
   workdir: string
@@ -31,8 +31,13 @@ const SCHEDULE_PRESETS: ReadonlyArray<{ cron: string; label: TimerAgentKey }> = 
   { cron: '0 9 * * 1', label: 'detail.schedule.preset.weeklyMon9' },
 ]
 
+/** The default-workspace placeholder group (used before options load). */
+export const DEFAULT_TARGET_GROUPS: TargetGroup[] = [
+  { key: 'default', name: '默认工作空间', workdir: '', sessions: [] },
+]
+
 /** Flatten a group into its selectable leaves: new-session first, sessions after. */
-function leavesOf(group: TargetGroup): Leaf[] {
+export function leavesOf(group: TargetGroup): Leaf[] {
   return [
     { key: `${group.key}:new`, label: '新增会话', workdir: group.workdir, sessionId: '' },
     ...group.sessions.map(session => ({
@@ -50,6 +55,59 @@ interface ModelLeaf {
   label: string
   provider: string
   model: string
+}
+
+/**
+ * The collapsible session-target tree (shared by the new-job modal and the
+ * job-detail editor). Pure presentational: callers own groups/selection.
+ */
+export function TargetTree({ groups, expanded, selectedKey, onToggle, onSelect }: {
+  groups: TargetGroup[]
+  expanded: ReadonlySet<string>
+  selectedKey: string
+  onToggle(key: string): void
+  onSelect(key: string): void
+}) {
+  return (
+    <div className={css.targetTree} role="tree" aria-label={t('new.target')}>
+      {groups.map(group => {
+        const open = expanded.has(group.key)
+        const leaves = leavesOf(group)
+        return (
+          <div key={group.key} className={css.targetGroup} role="group">
+            <button
+              type="button"
+              className={css.targetGroupHeader}
+              aria-expanded={open}
+              onClick={() => { onToggle(group.key) }}
+            >
+              <span className={`${css.targetCaret} ${open ? css.targetCaretOpen : ''}`} aria-hidden="true">▸</span>
+              <span className={css.targetGroupName}>{group.name}</span>
+              <span className={css.targetGroupCount}>{group.sessions.length > 0 ? `${group.sessions.length}` : ''}</span>
+            </button>
+            {open && (
+              <div className={css.targetGroupBody}>
+                {leaves.map(leaf => (
+                  <button
+                    key={leaf.key}
+                    type="button"
+                    role="treeitem"
+                    aria-selected={leaf.key === selectedKey}
+                    className={`${css.targetRow} ${leaf.key === selectedKey ? css.targetRowSelected : ''}`}
+                    onClick={() => { onSelect(leaf.key) }}
+                    title={leaf.sessionId === '' ? `${group.name} · 新增会话` : leaf.label}
+                  >
+                    <span className={css.targetRowDot} aria-hidden="true" />
+                    <span className={css.targetRowLabel}>{leaf.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 /** Flatten provider groups into selectable model leaves. */
@@ -73,7 +131,7 @@ export function NewJobModal({ controller, targetOptions, modelOptions, onClose }
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [prompt, setPrompt] = useState('')
-  const [groups, setGroups] = useState<TargetGroup[]>([{ key: 'default', name: '默认工作空间', workdir: '', sessions: [] }])
+  const [groups, setGroups] = useState<TargetGroup[]>(DEFAULT_TARGET_GROUPS)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set<string>())
   const [selectedKey, setSelectedKey] = useState('default:new')
   const [modelOptionsState, setModelOptionsState] = useState<ModelOptions>({ groups: [] })
@@ -187,44 +245,13 @@ export function NewJobModal({ controller, targetOptions, modelOptions, onClose }
 
         <div className={css.field}>
           <span className={css.fieldLabel}>{t('new.target')}</span>
-          <div className={css.targetTree} role="tree" aria-label={t('new.target')}>
-            {groups.map(group => {
-              const open = expanded.has(group.key)
-              const leaves = leavesOf(group)
-              return (
-                <div key={group.key} className={css.targetGroup} role="group">
-                  <button
-                    type="button"
-                    className={css.targetGroupHeader}
-                    aria-expanded={open}
-                    onClick={() => { toggleGroup(group.key) }}
-                  >
-                    <span className={`${css.targetCaret} ${open ? css.targetCaretOpen : ''}`} aria-hidden="true">▸</span>
-                    <span className={css.targetGroupName}>{group.name}</span>
-                    <span className={css.targetGroupCount}>{group.sessions.length > 0 ? `${group.sessions.length}` : ''}</span>
-                  </button>
-                  {open && (
-                    <div className={css.targetGroupBody}>
-                      {leaves.map(leaf => (
-                        <button
-                          key={leaf.key}
-                          type="button"
-                          role="treeitem"
-                          aria-selected={leaf.key === selectedKey}
-                          className={`${css.targetRow} ${leaf.key === selectedKey ? css.targetRowSelected : ''}`}
-                          onClick={() => { setSelectedKey(leaf.key) }}
-                          title={leaf.sessionId === '' ? `${group.name} · 新增会话` : leaf.label}
-                        >
-                          <span className={css.targetRowDot} aria-hidden="true" />
-                          <span className={css.targetRowLabel}>{leaf.label}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-          </div>
+          <TargetTree
+            groups={groups}
+            expanded={expanded}
+            selectedKey={selectedKey}
+            onToggle={toggleGroup}
+            onSelect={setSelectedKey}
+          />
           <span className={css.fieldHint}>{t('new.target.hint')}</span>
         </div>
 
