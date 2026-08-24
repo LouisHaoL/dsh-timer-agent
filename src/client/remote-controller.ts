@@ -13,6 +13,8 @@ import type {
   ControllerSnapshot, SessionsControllerFace,
 } from '../core/controller.ts'
 import type { JobRecord, NewJobInput, SessionTarget } from '../core/jobs.ts'
+import { detectSettlements, type SettlementEvent } from './settlements.ts'
+import { t } from './locales.ts'
 
 /** The sessions navigation face (ctx.sessions.open for transcript jumps). */
 export type { SessionsControllerFace }
@@ -30,6 +32,8 @@ export class RemoteBoardController {
   private listeners = new Set<() => void>()
   private pollTimer: ReturnType<typeof setInterval> | undefined
   private refreshInFlight = false
+  /** The ledger as seen by the previous completed poll (settlement diff base). */
+  private previousJobs: JobRecord[] = []
 
   /**
    * @param sessions - navigation face (open a session transcript).
@@ -72,6 +76,11 @@ export class RemoteBoardController {
     if (this.boardOpen) return
     this.boardOpen = true
     this.notify()
+    // Best-effort desktop-notification permission ask (a user gesture is in
+    // the call chain here — the sidebar entry click).
+    if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'default') {
+      void Notification.requestPermission().catch(() => undefined)
+    }
     void this.refresh()
   }
 
@@ -209,11 +218,42 @@ export class RemoteBoardController {
     try {
       const response = await this.fetchJson('GET', '/api/dsh-timer-agent/jobs')
       if (response !== undefined && Array.isArray(response.jobs)) {
-        this.jobs = response.jobs as JobRecord[]
+        const jobs = response.jobs as JobRecord[]
+        // Settlement notifications (OpenClaw RFC #96190 notifyOnCompletion):
+        // diff against the previous poll. Skipped while the board is open —
+        // the user is already looking at the status tabs.
+        if (!this.boardOpen) {
+          for (const event of detectSettlements(this.previousJobs, jobs)) this.announce(event)
+        }
+        this.previousJobs = jobs
+        this.jobs = jobs
         this.notify()
       }
     } finally {
       this.refreshInFlight = false
+    }
+  }
+
+  /** Surface one execution settlement as a desktop notification. */
+  private announce(event: SettlementEvent): void {
+    if (typeof window === 'undefined' || !('Notification' in window)) return
+    if (Notification.permission !== 'granted') return
+    const failed = event.result === 'failed'
+    const body = t(failed ? 'notify.failed.body' : 'notify.done.body', { name: event.title })
+    try {
+      const notification = new Notification(t(failed ? 'notify.failed.title' : 'notify.done.title'), {
+        body,
+        tag: `dsh-timer-agent:${event.jobId}:${event.endedAt}`,
+      })
+      notification.onclick = () => {
+        window.focus()
+        // Jump to the run's session when there is one; otherwise open the
+        // board on the job.
+        if (event.sessionId !== undefined && event.sessionId !== '') this.openSession(event.sessionId)
+        else { this.openBoard(); this.openJob(event.jobId) }
+      }
+    } catch (error) {
+      console.warn('[dsh-timer-agent] notification failed:', error)
     }
   }
 

@@ -92,6 +92,10 @@ export const zh = {
   'detail.schedule.notScheduled': '尚未排程',
   'detail.schedule.dueSoon': '即将运行',
   'card.scheduled': '定时',
+  'notify.done.title': '定时任务完成',
+  'notify.done.body': '「{name}」执行成功，点击查看会话',
+  'notify.failed.title': '定时任务失败',
+  'notify.failed.body': '「{name}」执行失败，点击查看会话',
   'time.justNow': '刚刚',
 } satisfies Record<string, string>
 
@@ -183,6 +187,10 @@ export const en: Record<keyof typeof zh, string> = {
   'detail.schedule.notScheduled': 'Not scheduled yet',
   'detail.schedule.dueSoon': 'Due soon',
   'card.scheduled': 'scheduled',
+  'notify.done.title': 'Timed job finished',
+  'notify.done.body': '"{name}" succeeded — click to open the session',
+  'notify.failed.title': 'Timed job failed',
+  'notify.failed.body': '"{name}" failed — click to open the session',
   'time.justNow': 'just now',
 }
 
