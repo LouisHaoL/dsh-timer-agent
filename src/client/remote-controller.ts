@@ -128,8 +128,10 @@ export class RemoteBoardController {
     this.pendingCreateCron = cron
   }
 
-  async updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt'>> & { target?: SessionTarget; cron?: string; scheduleEnabled?: boolean }): Promise<void> {
-    await this.fetchJson('PATCH', `/api/dsh-timer-agent/jobs?id=${encodeURIComponent(id)}`, patch)
+  async updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt'>> & { target?: SessionTarget; cron?: string; scheduleEnabled?: boolean; timeoutMinutes?: number }): Promise<void> {
+    const body: Record<string, unknown> = { ...patch }
+    if (patch.timeoutMinutes !== undefined) body.timeoutMinutes = patch.timeoutMinutes
+    await this.fetchJson('PATCH', `/api/dsh-timer-agent/jobs?id=${encodeURIComponent(id)}`, body)
     await this.refresh()
   }
 

@@ -69,6 +69,12 @@ interface InFlight {
   messageId: string
   /** Whether the session log consumed our message yet. */
   consumed: boolean
+  /** The live agent (for timeout cancellation). */
+  agent: HostAgent | undefined
+  /** Configured limit (ms) when the job carries a timeout; absent = unlimited. */
+  timeoutMs: number | undefined
+  /** Deadline (ms epoch) when the job carries a timeoutMs; absent = unlimited. */
+  timeoutAt: number | undefined
 }
 
 /**
@@ -115,9 +121,31 @@ export class TimerRunner {
   /** Fire pending manual-run requests only (the 5s fast path). */
   private async pollRequests(): Promise<void> {
     if (this.disposed) return
+    await this.checkTimeouts()
     const jobs = await this.store.load()
     if (!jobs.some(job => job.runRequestedAt !== undefined)) return
     await this.tick()
+  }
+
+  /**
+   * Enforce per-job run timeouts (n8n / cron-job.org parity, and the
+   * stuck-run risk hermes #121953-class issues describe): an execution
+   * still in flight past its deadline is cancelled and settled failed.
+   * At-most-once: the flight is removed BEFORE settle, so a late turn/end
+   * cannot double-settle.
+   */
+  private async checkTimeouts(): Promise<void> {
+    for (const flight of [...this.inFlight.values()]) {
+      if (flight.timeoutAt === undefined || this.now() < flight.timeoutAt) continue
+      this.inFlight.delete(flight.messageId)
+      try {
+        flight.agent?.cancel('dsh-timer-agent: run timed out')
+      } catch (error) {
+        console.warn('[dsh-timer-agent] timeout cancel failed:', error)
+      }
+      const seconds = flight.timeoutMs === undefined ? 0 : Math.max(1, Math.round(flight.timeoutMs / 1000))
+      void this.settle(flight.jobId, flight.executionId, 'failed', `run timed out after ${seconds}s (deadline reached)`)
+    }
   }
 
   async dispose(): Promise<void> {
@@ -135,6 +163,7 @@ export class TimerRunner {
    */
   async tick(): Promise<number> {
     if (this.disposed) return 0
+    await this.checkTimeouts()
     const jobs = await this.store.load()
     let fired = 0
     for (const job of jobs) {
@@ -218,6 +247,11 @@ export class TimerRunner {
         sessionId: agent.session.id,
         messageId: message.id,
         consumed: false,
+        agent,
+        timeoutMs: job.timeoutMs,
+        timeoutAt: job.timeoutMs !== undefined && job.timeoutMs > 0
+          ? this.now() + job.timeoutMs
+          : undefined,
       })
       agent.followup(message)
     } catch (error) {

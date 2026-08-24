@@ -91,6 +91,10 @@ export const zh = {
   'detail.schedule.invalid': 'Cron 表达式无效',
   'detail.schedule.notScheduled': '尚未排程',
   'detail.schedule.dueSoon': '即将运行',
+  'detail.timeout': '执行超时',
+  'detail.timeout.hint': '超过该时长仍未结束的执行会被自动取消并记为失败；留空或 0 表示不限时',
+  'detail.timeout.unlimited': '不限时',
+  'detail.timeout.minutes': '分钟',
   'card.scheduled': '定时',
   'time.justNow': '刚刚',
 } satisfies Record<string, string>
@@ -182,6 +186,10 @@ export const en: Record<keyof typeof zh, string> = {
   'detail.schedule.invalid': 'Invalid cron expression',
   'detail.schedule.notScheduled': 'Not scheduled yet',
   'detail.schedule.dueSoon': 'Due soon',
+  'detail.timeout': 'Run Timeout',
+  'detail.timeout.hint': 'A run still in flight past this limit is cancelled and marked failed; blank or 0 means unlimited',
+  'detail.timeout.unlimited': 'Unlimited',
+  'detail.timeout.minutes': 'minutes',
   'card.scheduled': 'scheduled',
   'time.justNow': 'just now',
 }
