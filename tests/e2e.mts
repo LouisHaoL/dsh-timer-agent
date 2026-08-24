@@ -301,6 +301,15 @@ section('timer_agent tool actions')
   const badUpdate = await tool.execute({ action: 'update', job_id: 'nope', prompt: 'x' }) as { error?: string }
   check('update unknown id rejected', typeof badUpdate.error === 'string')
 
+  // Webhook via the tool: enable → url+token; disable → cleared.
+  const hook = await tool.execute({ action: 'webhook', job_id: jobId }) as { job?: { url?: string, webhook?: boolean } }
+  check('tool webhook enable returns hook url', typeof hook.job?.url === 'string'
+    && hook.job!.url!.includes('/api/dsh-timer-agent/hooks/run?id=')
+    && hook.job!.url!.includes('token='))
+  check('tool webhook enable persists the token', ((await s.load())[0]?.webhookToken ?? '').length === 36)
+  const hookOff = await tool.execute({ action: 'webhook', job_id: jobId, webhook: false }) as { job?: { webhook?: boolean } }
+  check('tool webhook disable clears it', hookOff.job?.webhook !== true && (await s.load())[0]?.webhookToken === undefined)
+
   // remove
   await tool.execute({ action: 'remove', job_id: jobId })
   check('remove clears ledger', (await s.load()).length === 0)
@@ -318,10 +327,11 @@ section('HTTP routes: handlers + loopback fence')
   let now = Date.UTC(2026, 0, 1)
   const runner = new TimerRunner({ ctx: host.ctx, store: s, now: () => now })
   const routes = makeRoutes({ store: s, runner, ctx: host.ctx, now: () => now })
-  check('four routes composed', routes.length === 4)
+  check('five routes composed', routes.length === 5)
 
   const jobsRoute = routes.find(r => r.path.endsWith('/jobs'))!
   const runRoute = routes.find(r => r.path.endsWith('/jobs/run'))!
+  const hookRoute = routes.find(r => r.path.endsWith('/hooks/run'))!
   const wsRoute = routes.find(r => r.path.endsWith('/workspaces'))!
 
   // Minimal fake req/res over Node streams.
@@ -410,6 +420,53 @@ section('HTTP routes: handlers + loopback fence')
   Object.assign(req2, { headers: { host: '127.0.0.1:3080', 'sec-fetch-site': 'cross-site' } })
   await jobsRoute.handler(req2, crossSite.res)
   check('cross-site marker rejected 403', crossSite.status === 403, `${crossSite.status}`)
+
+  // Webhook: enable via PATCH → token minted
+  const hookCreated = makeRes()
+  await jobsRoute.handler(makeReq('POST', '/api/dsh-timer-agent/jobs', { title: 'hook-job' }), hookCreated.res)
+  const hookId = (JSON.parse(hookCreated.body).job as JobRecord).id
+  const hookEnabled = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${hookId}`, { webhookEnabled: true }), hookEnabled.res)
+  const hookJob = JSON.parse(hookEnabled.body).job as JobRecord
+  check('PATCH webhookEnabled mints a uuid token', hookEnabled.status === 200
+    && typeof hookJob.webhookToken === 'string' && /^[0-9a-f-]{36}$/u.test(hookJob.webhookToken!))
+
+  const hookUrl = (token: string): string => `/api/dsh-timer-agent/hooks/run?id=${encodeURIComponent(hookId)}&token=${encodeURIComponent(token)}`
+  const badToken = makeRes()
+  await hookRoute.handler(makeReq('POST', hookUrl('wrong-token')), badToken.res)
+  check('hook with wrong token → 401', badToken.status === 401, `${badToken.status}`)
+  const noToken = makeRes()
+  await hookRoute.handler(makeReq('POST', `/api/dsh-timer-agent/hooks/run?id=${hookId}`), noToken.res)
+  check('hook without token → 400', noToken.status === 400, `${noToken.status}`)
+  const notEnabledJob = makeRes()
+  await jobsRoute.handler(makeReq('POST', '/api/dsh-timer-agent/jobs', { title: 'plain-job' }), notEnabledJob.res)
+  const plainId = (JSON.parse(notEnabledJob.body).job as JobRecord).id
+  const notEnabled = makeRes()
+  await hookRoute.handler(makeReq('POST', `/api/dsh-timer-agent/hooks/run?id=${plainId}&token=whatever`), notEnabled.res)
+  check('hook on job without webhook → 403', notEnabled.status === 403, `${notEnabled.status}`)
+  await jobsRoute.handler(makeReq('DELETE', `/api/dsh-timer-agent/jobs?id=${plainId}`), makeRes().res)
+  const unknown = makeRes()
+  await hookRoute.handler(makeReq('POST', '/api/dsh-timer-agent/hooks/run?id=nope&token=x'), unknown.res)
+  check('hook on unknown job → 404', unknown.status === 404, `${unknown.status}`)
+
+  // THE POINT of the route: an EXTERNAL (non-loopback) caller with the
+  // token fires the job — no loopback fence here.
+  const external = makeRes()
+  await hookRoute.handler(makeReq('POST', hookUrl(hookJob.webhookToken!), undefined, '192.168.1.5'), external.res)
+  check('external caller with valid token → 202', external.status === 202, `${external.status}`)
+  check('hook fire started the run', (await s.load()).some(j => j.id === hookId && j.status === 'running'))
+  const whileRunning = makeRes()
+  await hookRoute.handler(makeReq('GET', hookUrl(hookJob.webhookToken!)), whileRunning.res)
+  check('hook while running → 409', whileRunning.status === 409, `${whileRunning.status}`)
+
+  // Disabling kills the hook.
+  const hookDisabled = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${hookId}`, { webhookEnabled: false, resetStatus: true }), hookDisabled.res)
+  check('PATCH webhookEnabled=false clears the token', (JSON.parse(hookDisabled.body).job as JobRecord).webhookToken === undefined)
+  const afterDisable = makeRes()
+  await hookRoute.handler(makeReq('POST', hookUrl(hookJob.webhookToken!)), afterDisable.res)
+  check('disabled hook → 403 even with the old token', afterDisable.status === 403, `${afterDisable.status}`)
+  await jobsRoute.handler(makeReq('DELETE', `/api/dsh-timer-agent/jobs?id=${hookId}`), makeRes().res)
 
   // Bad input: invalid cron on POST
   const badCron = makeRes()

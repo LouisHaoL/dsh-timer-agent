@@ -1,14 +1,18 @@
 /**
  * The /api/dsh-timer-agent route family: the browser half's read/write
- * window onto the host-authoritative ledger. Every route carries the same
- * loopback-only trust fence dsh-ssh uses (these endpoints can fire real
- * agent sessions, so LAN-exposed dsh web deployments must not serve them).
+ * window onto the host-authoritative ledger. Every route except the
+ * webhook hook carries the same loopback-only trust fence dsh-ssh uses
+ * (these endpoints can fire real agent sessions, so LAN-exposed dsh web
+ * deployments must not serve them). The hook route is authenticated by a
+ * per-job secret instead — that is its point.
  *
  * - GET    /api/dsh-timer-agent/jobs          → the full ledger
  * - POST   /api/dsh-timer-agent/jobs          → create a job
- * - PATCH  /api/dsh-timer-agent/jobs?id=…     → update fields / arm cron
+ * - PATCH  /api/dsh-timer-agent/jobs?id=…     → update fields / arm cron / toggle webhook
  * - DELETE /api/dsh-timer-agent/jobs?id=…     → remove
- * - POST   /api/dsh-timer-agent/jobs/run?id=… → fire now (background)
+ * - POST   /api/dsh-timer-agent/jobs/run?id=… → fire now (background, loopback only)
+ * - POST|GET /api/dsh-timer-agent/hooks/run?id=…&token=… → fire via external
+ *   webhook (token-authenticated; intentionally NOT loopback-fenced)
  * - GET    /api/dsh-timer-agent/workspaces    → host workspace registry {id,path}
  * - GET    /api/dsh-timer-agent/model-options → default model + provider/model catalog
  *
@@ -98,6 +102,16 @@ function readModelSelection(value: unknown): JobModelSelection | 'invalid' | und
   const model = typeof record.model === 'string' ? record.model.trim() : ''
   if (provider === '' || model === '') return 'invalid'
   return { provider, model }
+}
+
+/** Constant-time-ish token comparison (length leak is fine for uuids). */
+function tokenEquals(expected: string, presented: string): boolean {
+  if (expected.length !== presented.length) return false
+  let diff = 0
+  for (let index = 0; index < expected.length; index += 1) {
+    diff |= expected.charCodeAt(index) ^ presented.charCodeAt(index)
+  }
+  return diff === 0
 }
 
 /** Dependencies the routes close over. */
@@ -222,6 +236,10 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
             next = withSchedule(next, { enabled: false, nextRunAt: undefined }, deps.now())
           }
           if (body.resetStatus === true) next = withStatus(next, 'idle', deps.now())
+          // Webhook toggle: enabling (re)generates the token (rotation);
+          // disabling clears it and kills the hook.
+          if (body.webhookEnabled === true) next = { ...next, webhookToken: randomUUID() }
+          if (body.webhookEnabled === false) delete next.webhookToken
           // Archive freezes the job (no schedule fires, no manual runs); a
           // running job refuses the archive until its execution settles.
           if (body.archived === true && next.status !== 'running') {
@@ -292,6 +310,49 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
     },
   }
 
+  /**
+   * The external webhook hook: POST or GET with ?id=<jobId>&token=<secret>.
+   * Deliberately NOT behind the loopback fence — the per-job token is the
+   * auth, so CI boxes, phone shortcuts, and LAN scripts can fire jobs.
+   * Firing reuses the runner (skip-while-running / archived refusals apply).
+   */
+  const hookRoute: HostRoute = {
+    kind: 'exact',
+    path: '/api/dsh-timer-agent/hooks/run',
+    handler: async (req, res) => {
+      if (req.method !== 'POST' && req.method !== 'GET') {
+        writeJson(res, 405, { error: `method not allowed: ${req.method}` })
+        return
+      }
+      const id = queryParam(req, 'id')
+      const token = queryParam(req, 'token')
+      if (id === undefined || id === '' || token === undefined || token === '') {
+        writeJson(res, 400, { error: 'id and token query parameters are required' })
+        return
+      }
+      const jobs = await deps.store.load()
+      const job = jobs.find(candidate => candidate.id === id)
+      if (job === undefined) {
+        writeJson(res, 404, { error: 'job not found' })
+        return
+      }
+      if (job.webhookToken === undefined) {
+        writeJson(res, 403, { error: 'webhook not enabled for this job' })
+        return
+      }
+      if (!tokenEquals(job.webhookToken, token)) {
+        writeJson(res, 401, { error: 'invalid token' })
+        return
+      }
+      const accepted = await deps.runner.requestRun(id)
+      if (!accepted) {
+        writeJson(res, 409, { error: 'job is running or archived' })
+        return
+      }
+      writeJson(res, 202, { ok: true, note: 'fired in the background' })
+    },
+  }
+
   const workspacesRoute: HostRoute = {
     kind: 'exact',
     path: '/api/dsh-timer-agent/workspaces',
@@ -355,5 +416,5 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
     },
   }
 
-  return [jobsRoute, runRoute, workspacesRoute, modelOptionsRoute]
+  return [jobsRoute, runRoute, hookRoute, workspacesRoute, modelOptionsRoute]
 }

@@ -128,7 +128,7 @@ export class RemoteBoardController {
     this.pendingCreateCron = cron
   }
 
-  async updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt'>> & { target?: SessionTarget; cron?: string; scheduleEnabled?: boolean }): Promise<void> {
+  async updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt'>> & { target?: SessionTarget; cron?: string; scheduleEnabled?: boolean; webhookEnabled?: boolean }): Promise<void> {
     await this.fetchJson('PATCH', `/api/dsh-timer-agent/jobs?id=${encodeURIComponent(id)}`, patch)
     await this.refresh()
   }

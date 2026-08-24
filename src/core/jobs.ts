@@ -116,6 +116,15 @@ export interface JobRecord {
    * browser/tool → host command channel through the shared ledger.
    */
   runRequestedAt?: number
+  /**
+   * External webhook token (uuid): PRESENCE enables the hook — anyone
+   * holding it may fire this job via POST/GET
+   * /api/dsh-timer-agent/hooks/run?id=<jobId>&token=<webhookToken>. The
+   * token is the auth (that route skips the loopback fence by design, so
+   * CI boxes / scripts on the LAN can trigger runs); clear the field to
+   * disable. Rotate by re-enabling.
+   */
+  webhookToken?: string
   /** Scheduled-run rule (absent on jobs without a schedule). */
   schedule?: ScheduleRule
 }

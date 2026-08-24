@@ -44,6 +44,7 @@ function summarize(job: JobRecord): JsonValue {
       : { workdir: job.target.workdir === '' ? '(default workspace)' : job.target.workdir, mode: 'new-session' },
   }
   if (schedule !== undefined) result.schedule = schedule as JsonValue
+  if (job.webhookToken !== undefined) result.webhook = true
   if (last !== undefined) {
     result.last_execution = {
       result: last.result ?? 'running',
@@ -66,7 +67,7 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
     description: [
       'Manage scheduled timer jobs that fire real agent sessions on a cron schedule (the dsh-timer-agent engine; the same jobs appear in the web GUI「定时任务」panel).',
       "action='create' schedules a new job (requires schedule + prompt; prompt must be self-contained — scheduled runs get no current-chat context unless session is pinned).",
-      "action='list' shows all jobs; action='update' edits prompt/schedule/name; action='pause'/'resume' arms/disarms the schedule; action='archive' freezes a job (no schedule fires, no manual runs) and action='restart' un-archives it back to idle; action='remove' deletes; action='run' fires immediately in the background (returns at once; the run happens in its own session).",
+      "action='list' shows all jobs; action='update' edits prompt/schedule/name; action='pause'/'resume' arms/disarms the schedule; action='archive' freezes a job (no schedule fires, no manual runs) and action='restart' un-archives it back to idle; action='remove' deletes; action='run' fires immediately in the background (returns at once; the run happens in its own session); action='webhook' enables/rotates (or with webhook=false disables) an external HTTP trigger token for the job.",
       "schedule syntax: 5-field cron like '0 9 * * *' (min hour day month weekday).",
       "session targeting: leave both workdir and session empty → each run starts a NEW conversation in the default workspace; pass session=<existing session id> → every run continues that conversation (continuity); pass workdir=<absolute project path> → new sessions run inside that project.",
       'Scheduled runs execute autonomously with no user present — prompts must not ask questions.',
@@ -101,6 +102,10 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
         type: 'string',
         description: 'For create/update: pin an existing session id — every run continues that conversation instead of starting new ones. Pass empty string on update to clear.',
       },
+      webhook: {
+        type: 'boolean',
+        description: "For action='webhook': true (default) enables/rotates the external trigger token, false disables it.",
+      },
     },
     output: {
       schema: {
@@ -128,6 +133,7 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
       name?: string
       workdir?: string
       session?: string
+      webhook?: boolean
     }): Promise<TimerToolOutput> {
       const action = (args.action ?? '').trim().toLowerCase()
       const now = deps.now
@@ -261,6 +267,32 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
           }
         }
         return { kind: action, job: summarize(updated) }
+      }
+
+      // External webhook toggle: enable/rotate (default) or disable. The
+      // hook endpoint authenticates with the returned token.
+      if (action === 'webhook') {
+        const updated = await deps.store.mutate(jobs => {
+          const job = jobs.find(candidate => candidate.id === id)
+          if (job === undefined) return undefined
+          const enable = args.webhook !== false
+          const next: JobRecord = enable
+            ? { ...job, updatedAt: now(), webhookToken: randomUUID() }
+            : { ...job, updatedAt: now() }
+          if (!enable) delete next.webhookToken
+          return { jobs: jobs.map(candidate => (candidate.id === id ? next : candidate)), result: next }
+        })
+        if (updated === undefined) return { kind: 'webhook', error: `job ${id} not found` }
+        if (updated.webhookToken === undefined) return { kind: 'webhook', job: { id, webhook: false } }
+        return {
+          kind: 'webhook',
+          job: {
+            id,
+            webhook: true,
+            method: 'POST',
+            url: `/api/dsh-timer-agent/hooks/run?id=${encodeURIComponent(id)}&token=${encodeURIComponent(updated.webhookToken)}`,
+          } as JsonValue,
+        }
       }
 
       return { kind: action, error: `unknown action: ${action}` }

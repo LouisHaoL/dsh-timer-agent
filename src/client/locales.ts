@@ -92,6 +92,11 @@ export const zh = {
   'detail.schedule.notScheduled': '尚未排程',
   'detail.schedule.dueSoon': '即将运行',
   'card.scheduled': '定时',
+  'detail.webhook': '外部触发 Webhook',
+  'detail.webhook.enable': '启用外部 Webhook 触发（保存后生成新令牌）',
+  'detail.webhook.disabled': '未启用',
+  'detail.webhook.hint': '开启后，任何持有令牌的一方（CI、手机快捷指令、局域网脚本）都能通过该端点手动触发本任务；令牌即鉴权，请妥善保管，重新保存可轮换',
+  'detail.webhook.url': '请求端点',
   'time.justNow': '刚刚',
 } satisfies Record<string, string>
 
@@ -183,6 +188,11 @@ export const en: Record<keyof typeof zh, string> = {
   'detail.schedule.notScheduled': 'Not scheduled yet',
   'detail.schedule.dueSoon': 'Due soon',
   'card.scheduled': 'scheduled',
+  'detail.webhook': 'External Webhook',
+  'detail.webhook.enable': 'Enable external webhook trigger (saving mints a fresh token)',
+  'detail.webhook.disabled': 'Not enabled',
+  'detail.webhook.hint': 'Once enabled, anyone holding the token (CI, phone shortcuts, LAN scripts) can fire this job over HTTP; the token is the only auth — store it safely and re-save to rotate',
+  'detail.webhook.url': 'Endpoint',
   'time.justNow': 'just now',
 }
 

@@ -133,6 +133,7 @@ export function JobDetail({ controller, job, targetOptions }: { controller: Boar
   const [selectedKey, setSelectedKey] = useState('')
   const [cronDraft, setCronDraft] = useState(current.schedule?.cron ?? '0 9 * * *')
   const [scheduleEnabledDraft, setScheduleEnabledDraft] = useState(current.schedule?.enabled ?? false)
+  const [webhookDraft, setWebhookDraft] = useState(current.webhookToken !== undefined)
   const [error, setError] = useState<string | undefined>(undefined)
 
   /** All leaves across groups, for resolving the current selection. */
@@ -156,6 +157,7 @@ export function JobDetail({ controller, job, targetOptions }: { controller: Boar
     setPromptDraft(current.prompt)
     setCronDraft(current.schedule?.cron ?? '0 9 * * *')
     setScheduleEnabledDraft(current.schedule?.enabled ?? false)
+    setWebhookDraft(current.webhookToken !== undefined)
     setError(undefined)
     setSaving(false)
     void targetOptions().then(next => {
@@ -189,11 +191,15 @@ export function JobDetail({ controller, job, targetOptions }: { controller: Boar
     }
     setError(undefined)
     setSaving(true)
+    // Only send the webhook toggle when it CHANGED: an unchanged true would
+    // rotate the token on every save.
+    const webhookChanged = webhookDraft !== (current.webhookToken !== undefined)
     void Promise.resolve(controller.updateJob(current.id, {
       prompt: promptDraft,
       target: { workdir: selectedTarget.workdir, sessionId: selectedTarget.sessionId },
       cron,
       scheduleEnabled: scheduleEnabledDraft,
+      ...(webhookChanged ? { webhookEnabled: webhookDraft } : {}),
     })).then(() => {
       setEditing(false)
       setSaving(false)
@@ -342,6 +348,36 @@ export function JobDetail({ controller, job, targetOptions }: { controller: Boar
                   {' · '}{t('detail.schedule.lastTriggered')} {lastLabel}
                 </p>
               </>
+            )}
+          </section>
+
+          <section className={css.detailSection}>
+            <h4>{t('detail.webhook')}</h4>
+            {editing ? (
+              <>
+                <label className={css.scheduleToggle}>
+                  <input
+                    type="checkbox"
+                    checked={webhookDraft}
+                    onChange={event => { setWebhookDraft(event.target.checked); setError(undefined) }}
+                  />
+                  <span>{t('detail.webhook.enable')}</span>
+                </label>
+                <span className={css.fieldHint}>{t('detail.webhook.hint')}</span>
+              </>
+            ) : (
+              current.webhookToken !== undefined ? (
+                <>
+                  <p className={css.detailText}>
+                    {t('detail.webhook.url')}：<code className={css.promptBlock} style={{ display: 'block', margin: '4px 0' }}>
+                      POST /api/dsh-timer-agent/hooks/run?id={current.id}&amp;token={current.webhookToken}
+                    </code>
+                  </p>
+                  <span className={css.fieldHint}>{t('detail.webhook.hint')}</span>
+                </>
+              ) : (
+                <p className={css.detailText}>{t('detail.webhook.disabled')}</p>
+              )
             )}
           </section>
 
