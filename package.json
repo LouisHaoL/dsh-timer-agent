@@ -80,7 +80,7 @@
     "build": "tsdown && node scripts/inline-css.mjs",
     "watch": "tsdown --watch",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-transform-types tests/e2e.mts",
+    "test": "node --experimental-transform-types tests/e2e.mts && node --experimental-transform-types tests/ui.mts",
     "smoke-test": "pnpm run build && node scripts/smoke-test.mjs"
   }
 }

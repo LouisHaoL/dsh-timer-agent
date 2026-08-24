@@ -168,7 +168,25 @@ export class RemoteBoardController {
 
   /** Jump to an execution's session transcript. */
   openSession(sessionId: string): void {
-    this.sessions.open(sessionId)
+    // The board overlays the conversation pane (single-occupant center
+    // column): opening a session while the board stays active looks like
+    // "nothing happened". Hand the column back FIRST, then navigate.
+    this.closeJob()
+    this.closeBoard()
+    // A scheduled run's session is created headlessly and may not be in the
+    // browser's list mirror yet — sessions.open() throws on unknown ids, so
+    // refresh the list when the face offers it, and never let a navigation
+    // failure escape into the click handler.
+    const open = (): void => {
+      try {
+        this.sessions.open(sessionId)
+      } catch (error) {
+        console.warn('[dsh-timer-agent] open session failed:', sessionId, error)
+      }
+    }
+    const refresh = this.sessions.refresh
+    if (refresh === undefined) open()
+    else void Promise.resolve(refresh.call(this.sessions)).then(open, open)
   }
 
   /** Fire now (host runs it in the background). */

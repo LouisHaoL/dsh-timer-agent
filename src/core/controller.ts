@@ -13,6 +13,12 @@ export interface SessionsControllerFace {
   }
   /** Select a session as current (navigates the conversation view). */
   open(id: string): void
+  /**
+   * Re-pull the session list from the host (optional): a scheduled run's
+   * session may have been created headlessly after the last pull, and
+   * open() of an id the mirror has never seen would throw.
+   */
+  refresh?(): Promise<void>
 }
 
 /** Immutable controller snapshot for UI subscriptions. */

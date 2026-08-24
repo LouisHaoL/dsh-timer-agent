@@ -45,6 +45,12 @@ export function apply(ctx: unknown): void {
     open: (id: string) => {
       sessions.open(id)
     },
+    // Forward the list re-pull when the service offers it (headlessly
+    // created run sessions are invisible to a stale mirror; see
+    // remote-controller.openSession).
+    ...(typeof (sessions as { refresh?: unknown }).refresh === 'function'
+      ? { refresh: () => (sessions as unknown as { refresh(): Promise<void> }).refresh() }
+      : {}),
   }
 
   const controller = new RemoteBoardController(sessionsFace)
