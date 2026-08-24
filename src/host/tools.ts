@@ -71,6 +71,7 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
       "session targeting: leave both workdir and session empty → each run starts a NEW conversation in the default workspace; pass session=<existing session id> → every run continues that conversation (continuity); pass workdir=<absolute project path> → new sessions run inside that project.",
       'Scheduled runs execute autonomously with no user present — prompts must not ask questions.',
     ].join('\n'),
+    timeoutMs: 15000,
     parameters: {
       action: {
         type: 'string',

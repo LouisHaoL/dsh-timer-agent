@@ -57,6 +57,30 @@ dsh plugin --profile web add link:<本目录绝对路径>
 
 安装后**重启 `dsh web`**,侧边栏出现「定时任务」入口即生效(浏览器侧改动强刷 `Ctrl+F5` 即可)。
 
+## Configuration
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| enabled | boolean | true | Master switch: ticker + tool + routes. Set false to disable the engine without uninstalling. |
+| announceToAgent | boolean | true | Inject a system-prompt section announcing the plugin's capabilities to the agent. |
+
+## Tools
+
+### `timer_agent`
+
+Manage the scheduled jobs the host ticker owns (the same rows the web GUI「定时任务」panel renders).
+
+**Parameters:**
+- `action` (string, required): `create` / `list` / `update` / `pause` / `resume` / `archive` / `restart` / `remove` / `run`
+- `job_id` (string): job id, required for all actions except `create`/`list` (get ids from `list`; never guess)
+- `prompt` (string): for `create` — the full self-contained prompt the scheduled run executes; for `update` — replacement; for `run` — transient context for that single fire
+- `schedule` (string): 5-field cron, e.g. `0 9 * * *`; required for `create`
+- `name` (string): short human title
+- `workdir` (string): absolute project directory the run's session works in (empty = default workspace)
+- `session` (string): pin an existing session id — every run continues that conversation
+
+**Returns:** `{ kind, job?, jobs?, error? }` — summarized job row(s) or a structured error message.
+
 ## 构建
 
 ```sh

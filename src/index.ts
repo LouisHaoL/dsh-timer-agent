@@ -20,6 +20,9 @@ import { makeRoutes } from './host/routes.ts'
 /** Order of the announcement section within the tool-guidance band. */
 const SECTION_ORDER = 201
 
+/** Plugin name: used for logs, diagnostics, and Fiber identity. */
+export const name = 'dsh-timer-agent'
+
 export const inject = ['webServer', 'tools', 'systemPrompt', 'agents']
 
 /** Model-facing announcement: plugin presence, capabilities, and limits. */
