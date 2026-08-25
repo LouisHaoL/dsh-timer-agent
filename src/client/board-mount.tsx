@@ -26,7 +26,17 @@ const PANEL_NAME = 'timeragent'
 
 /** Find the center column, or undefined while the frame is not mounted. */
 function conversationColumn(): HTMLElement | undefined {
-  return document.querySelector<HTMLElement>(CONVERSATION_COLUMN_SELECTOR) ?? undefined
+  // Try multiple selectors for different DSH versions/shells
+  const selectors = [
+    '[data-pane="conversation"]',
+    '[class*="centerCol"]',
+    '[class*="conversation"]:not([class*="sidebar"])',
+  ]
+  for (const sel of selectors) {
+    const el = document.querySelector<HTMLElement>(sel)
+    if (el) return el
+  }
+  return undefined
 }
 
 /**

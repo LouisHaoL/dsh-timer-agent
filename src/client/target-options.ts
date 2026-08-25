@@ -76,7 +76,9 @@ function sessionRows(ctx: ClientContext): SessionRow[] {
         list?: { getSnapshot?(): unknown }
       }
     }).sessions
-    const snapshot = sessions?.list?.getSnapshot?.() as {
+    // Fallback when sessions service is missing
+    if (!sessions?.list?.getSnapshot) return []
+    const snapshot = sessions.list.getSnapshot() as {
       byId?: Record<string, {
         id?: string
         displayTitle?: string
@@ -101,7 +103,8 @@ function sessionRows(ctx: ClientContext): SessionRow[] {
     }
     rows.sort((a, b) => b.updatedAt - a.updatedAt)
     return rows
-  } catch {
+  } catch (error) {
+    console.warn('[dsh-timer-agent] sessionRows failed:', error)
     return []
   }
 }

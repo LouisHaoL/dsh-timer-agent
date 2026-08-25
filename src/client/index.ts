@@ -30,8 +30,21 @@ export function apply(ctx: unknown): void {
   // service members (list/open/refresh) straight off it throws "cannot get
   // property ... without inject", and an eager read at apply time fails the
   // whole web boot. Everything downstream works on the plain service object.
-  const sessions = (ctx as { sessions: SessionsServiceShape }).sessions
-  const sessionsFace = sessionsFaceOf(sessions)
+  const ctxTyped = ctx as { sessions?: SessionsServiceShape }
+  const sessions = ctxTyped.sessions
+
+  // Fallback when sessions service is missing (e.g., when dsh-web plugin is removed)
+  const sessionsFace = sessions !== undefined
+    ? sessionsFaceOf(sessions)
+    : {
+        list: {
+          getSnapshot: () => ({ current: undefined }),
+          subscribe: () => () => {},
+        },
+        open: (_id: string) => {
+          console.warn('[dsh-timer-agent] sessions.open called but sessions service is unavailable')
+        },
+      }
 
   const controller = new RemoteBoardController(sessionsFace)
   controller.start()
@@ -39,7 +52,14 @@ export function apply(ctx: unknown): void {
   const disposers: Array<() => void> = []
   try {
     // Session-target dropdown data source: rebuilt on each modal open.
-    const targetOptions = (): ReturnType<typeof listTargetOptions> => listTargetOptions(ctx as never)
+    const targetOptions = (): ReturnType<typeof listTargetOptions> => {
+      try {
+        return listTargetOptions(ctx as never)
+      } catch (error) {
+        console.warn('[dsh-timer-agent] target-options failed, returning empty:', error)
+        return []
+      }
+    }
     disposers.push(mountSidebarEntry(controller))
     disposers.push(mountBoard(controller, targetOptions))
   } catch (error) {
@@ -47,14 +67,14 @@ export function apply(ctx: unknown): void {
     console.error('[dsh-timer-agent] mount failed:', error)
   }
 
-  ;(ctx as { effect(setup: () => () => void, key: string): unknown }).effect(() => {
-    // Cordis effect semantics: setup runs now and its RETURN VALUE is the
-    // registered teardown. Returning the disposer (not running it here) is
-    // the fix for the entry-vanishing bug: as a direct body it executed at
-    // apply time and tore the mounts down immediately after mounting them.
-    return () => {
-      for (const dispose of disposers.splice(0)) dispose()
-      controller.dispose()
-    }
-  }, 'dsh-timer-agent: unmount')
+  // Teardown: Cordis effect when available (client runtime), otherwise direct disposal.
+  const effectFn = (ctxTyped as { effect?(setup: () => () => void, key: string): unknown }).effect
+  if (typeof effectFn === 'function') {
+    effectFn(() => {
+      return () => {
+        for (const dispose of disposers.splice(0)) dispose()
+        controller.dispose()
+      }
+    }, 'dsh-timer-agent: unmount')
+  }
 }
