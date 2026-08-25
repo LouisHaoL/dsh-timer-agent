@@ -10,7 +10,7 @@
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import { randomUUID } from 'node:crypto'
 import { isValidCron, nextRunAtMs } from '../core/schedule.ts'
-import { createJob, withSchedule, withStatus, withRunRequest, type JobRecord } from '../core/jobs.ts'
+import { createJob, normalizeTimeoutMs, withSchedule, withStatus, withRunRequest, type JobRecord } from '../core/jobs.ts'
 import type { HostJobStore } from './store.ts'
 import type { TimerRunner } from './runner.ts'
 
@@ -44,6 +44,7 @@ function summarize(job: JobRecord): JsonValue {
       : { workdir: job.target.workdir === '' ? '(default workspace)' : job.target.workdir, mode: 'new-session' },
   }
   if (schedule !== undefined) result.schedule = schedule as JsonValue
+  if (job.timeoutMs !== undefined) result.timeout_minutes = Math.round(job.timeoutMs / 60_000)
   if (last !== undefined) {
     result.last_execution = {
       result: last.result ?? 'running',
@@ -101,6 +102,10 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
         type: 'string',
         description: 'For create/update: pin an existing session id — every run continues that conversation instead of starting new ones. Pass empty string on update to clear.',
       },
+      timeout_minutes: {
+        type: 'number',
+        description: 'For create/update: cancel and fail a run still in flight after this many minutes (0 or negative clears the limit). Absent = unlimited.',
+      },
     },
     output: {
       schema: {
@@ -128,6 +133,7 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
       name?: string
       workdir?: string
       session?: string
+      timeout_minutes?: number
     }): Promise<TimerToolOutput> {
       const action = (args.action ?? '').trim().toLowerCase()
       const now = deps.now
@@ -150,7 +156,9 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
           prompt,
           target: { workdir: (args.workdir ?? '').trim(), sessionId: (args.session ?? '').trim() },
         }, now(), randomUUID())
-        const scheduled = withSchedule(job, { enabled: true, cron, nextRunAt: nextRunAtMs(cron, now()) }, now())
+        const timeoutMs = normalizeTimeoutMs((args.timeout_minutes ?? 0) * 60_000)
+        const withTimeout = timeoutMs === undefined ? job : { ...job, timeoutMs }
+        const scheduled = withSchedule(withTimeout, { enabled: true, cron, nextRunAt: nextRunAtMs(cron, now()) }, now())
         await deps.store.mutate(jobs => ({ jobs: [...jobs, scheduled], result: true }))
         return { kind: 'create', job: summarize(scheduled) }
       }
@@ -203,6 +211,11 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
           if (args.prompt !== undefined && args.prompt.trim() !== '') next = { ...next, prompt: args.prompt.trim() }
           if (args.workdir !== undefined) next = { ...next, target: { ...next.target, workdir: args.workdir.trim() } }
           if (args.session !== undefined) next = { ...next, target: { ...next.target, sessionId: args.session.trim() } }
+          if (args.timeout_minutes !== undefined) {
+            const timeoutMs = normalizeTimeoutMs(args.timeout_minutes * 60_000)
+            if (timeoutMs === undefined) delete next.timeoutMs
+            else next = { ...next, timeoutMs }
+          }
           if (args.schedule !== undefined) {
             const cron = args.schedule.trim()
             if (cron === '') return undefined

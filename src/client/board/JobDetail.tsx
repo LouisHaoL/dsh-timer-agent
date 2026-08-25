@@ -11,7 +11,7 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import { isValidCron, nextRunAtMs } from '../../core/schedule.ts'
-import type { ExecutionRecord, JobRecord } from '../../core/jobs.ts'
+import { timeoutLabel, type ExecutionRecord, type JobRecord } from '../../core/jobs.ts'
 import type { TargetGroup } from '../target-options.ts'
 import type { BoardControllerFace } from '../controller-face.ts'
 import { t, type TimerAgentKey } from '../locales.ts'
@@ -133,6 +133,7 @@ export function JobDetail({ controller, job, targetOptions }: { controller: Boar
   const [selectedKey, setSelectedKey] = useState('')
   const [cronDraft, setCronDraft] = useState(current.schedule?.cron ?? '0 9 * * *')
   const [scheduleEnabledDraft, setScheduleEnabledDraft] = useState(current.schedule?.enabled ?? false)
+  const [timeoutDraft, setTimeoutDraft] = useState(current.timeoutMs !== undefined ? String(Math.round(current.timeoutMs / 60_000)) : '')
   const [error, setError] = useState<string | undefined>(undefined)
 
   /** All leaves across groups, for resolving the current selection. */
@@ -156,6 +157,7 @@ export function JobDetail({ controller, job, targetOptions }: { controller: Boar
     setPromptDraft(current.prompt)
     setCronDraft(current.schedule?.cron ?? '0 9 * * *')
     setScheduleEnabledDraft(current.schedule?.enabled ?? false)
+    setTimeoutDraft(current.timeoutMs !== undefined ? String(Math.round(current.timeoutMs / 60_000)) : '')
     setError(undefined)
     setSaving(false)
     void targetOptions().then(next => {
@@ -189,11 +191,14 @@ export function JobDetail({ controller, job, targetOptions }: { controller: Boar
     }
     setError(undefined)
     setSaving(true)
+    // Blank / 0 / negative timeout clears the limit (host normalizes).
+    const timeoutMinutes = timeoutDraft.trim() === '' ? 0 : Number(timeoutDraft)
     void Promise.resolve(controller.updateJob(current.id, {
       prompt: promptDraft,
       target: { workdir: selectedTarget.workdir, sessionId: selectedTarget.sessionId },
       cron,
       scheduleEnabled: scheduleEnabledDraft,
+      ...(Number.isFinite(timeoutMinutes) ? { timeoutMinutes } : {}),
     })).then(() => {
       setEditing(false)
       setSaving(false)
@@ -342,6 +347,34 @@ export function JobDetail({ controller, job, targetOptions }: { controller: Boar
                   {' · '}{t('detail.schedule.lastTriggered')} {lastLabel}
                 </p>
               </>
+            )}
+          </section>
+
+          <section className={css.detailSection}>
+            <h4>{t('detail.timeout')}</h4>
+            {editing ? (
+              <>
+                <div className={css.scheduleRow}>
+                  <input
+                    className={css.input}
+                    style={{ width: '120px' }}
+                    type="number"
+                    min={0}
+                    value={timeoutDraft}
+                    placeholder="∞"
+                    aria-label={t('detail.timeout')}
+                    onChange={event => { setTimeoutDraft(event.target.value); setError(undefined) }}
+                  />
+                  <span className={css.fieldHint}>{t('detail.timeout.minutes')}</span>
+                </div>
+                <span className={css.fieldHint}>{t('detail.timeout.hint')}</span>
+              </>
+            ) : (
+              <p className={css.detailText}>
+                {current.timeoutMs !== undefined && current.timeoutMs > 0
+                  ? `${timeoutLabel(current)} · ${t('detail.timeout.minutes')}`
+                  : t('detail.timeout.unlimited')}
+              </p>
             )}
           </section>
 

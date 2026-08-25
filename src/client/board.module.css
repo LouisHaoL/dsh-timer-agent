@@ -141,45 +141,138 @@ html[data-dsh-timeragent-active]:not([data-dsh-ssh-active]):not([data-dsh-taskbo
   color: var(--dsw-alias-label-tertiary);
 }
 
-/* --- job list ------------------------------------------------------------------ */
+/* --- status tab bar --------------------------------------------------------------- */
 
-.list {
+.tabBar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-inset, rgba(128, 128, 128, 0.06));
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tabBar::-webkit-scrollbar { display: none; }
+
+.tabButton {
+  flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 5px 12px;
+  font-size: 12.5px;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.tabButton:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-fill-minor, rgba(128, 128, 128, 0.12));
+}
+
+.tabButton[data-active] {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-elevated, var(--dsw-alias-bg-base));
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.14);
+}
+
+.tabLabel { font-weight: 500; }
+
+.tabCount {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  color: var(--dsw-alias-label-tertiary);
+  background: var(--dsw-alias-fill-minor, rgba(128, 128, 128, 0.14));
+}
+
+.tabButton[data-active] .tabCount {
+  color: #fff;
+  background: var(--dsw-specific-button-primary, #4c8bf5);
+}
+
+.tabCount[data-tab='running'] { color: #4c8bf5; }
+.tabCount[data-tab='done'] { color: #3aa675; }
+.tabCount[data-tab='failed'] { color: #d4574e; }
+
+.tabButton[data-active] .tabCount[data-tab='running'],
+.tabButton[data-active] .tabCount[data-tab='done'],
+.tabButton[data-active] .tabCount[data-tab='failed'] {
+  color: #fff;
+  background: var(--dsw-specific-button-primary, #4c8bf5);
+}
+
+/* --- job card grid ------------------------------------------------------------------ */
+
+.cardGrid {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  grid-auto-rows: min-content;
+  gap: 10px;
+  align-content: start;
   padding-right: 2px;
 }
 
-.rowCard {
+.jobCard {
   display: flex;
   flex-direction: column;
   gap: 6px;
   text-align: left;
   padding: 10px 12px;
   border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--dsw-alias-bg-elevated, var(--dsw-alias-bg-base));
   cursor: pointer;
+  transition: border-color 0.12s ease, transform 0.12s ease;
 }
 
-.rowCard:hover {
+.jobCard:hover {
   border-color: var(--dsw-alias-border-l1, var(--dsw-alias-border-l2));
+  transform: translateY(-1px);
 }
 
-.rowCard[data-status='running'] {
+.jobCard[data-status='running'] {
   border-color: var(--dsw-alias-border-highlight, #4c8bf5);
 }
 
-.rowTitle {
+.jobCard[data-status='archived'] { opacity: 0.72; }
+
+.cardTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.cardTitle {
   font-size: 13px;
   font-weight: 600;
   color: var(--dsw-alias-label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.rowExcerpt {
+.jobCard[data-status='archived'] .cardTitle {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.cardExcerpt {
   font-size: 12px;
   color: var(--dsw-alias-label-secondary);
   overflow: hidden;
@@ -187,10 +280,11 @@ html[data-dsh-timeragent-active]:not([data-dsh-ssh-active]):not([data-dsh-taskbo
   white-space: nowrap;
 }
 
-.rowMeta {
+.cardMeta {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 6px;
   font-size: 11px;
   color: var(--dsw-alias-label-tertiary);
 }
@@ -227,7 +321,7 @@ html[data-dsh-timeragent-active]:not([data-dsh-ssh-active]):not([data-dsh-taskbo
   opacity: 0.75;
 }
 
-.rowCard[data-status='archived'] .rowTitle {
+.jobCard[data-status='archived'] .cardTitle {
   color: var(--dsw-alias-label-tertiary);
 }
 
