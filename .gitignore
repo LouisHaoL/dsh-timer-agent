@@ -2,3 +2,4 @@ node_modules/
 lib/
 *.tmp
 .DS_Store
+.tmp-shots/

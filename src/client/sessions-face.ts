@@ -35,9 +35,14 @@ export interface SessionsServiceShape {
  * @returns the navigation face for RemoteBoardController.
  */
 export function sessionsFaceOf(service: SessionsServiceShape): SessionsControllerFace {
-  // Capture the optional member once so the typeof guard narrows it for the
-  // forwarded closure below (const narrowing survives into closures).
-  const serviceRefresh = service.refresh
+  // Bind the optional member ONCE, on the service object: the concrete
+  // service's refresh is a prototype method whose `this` must be the service
+  // itself — calling the captured bare function throws "Cannot read
+  // properties of undefined (reading 'manager')" and kills the whole
+  // openSession navigation (the 查看会话 jump silently did nothing).
+  const serviceRefresh = typeof service.refresh === 'function'
+    ? service.refresh.bind(service)
+    : undefined
   return {
     list: {
       getSnapshot: () => {
@@ -54,7 +59,7 @@ export function sessionsFaceOf(service: SessionsServiceShape): SessionsControlle
     // Forward the list re-pull when the service offers it (headlessly
     // created run sessions are invisible to a stale mirror; see
     // remote-controller.openSession).
-    ...(typeof serviceRefresh === 'function'
+    ...(serviceRefresh !== undefined
       ? { refresh: () => serviceRefresh() }
       : {}),
   }

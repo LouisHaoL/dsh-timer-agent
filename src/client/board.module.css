@@ -233,6 +233,11 @@ html[data-dsh-timeragent-active]:not([data-dsh-ssh-active]):not([data-dsh-taskbo
   flex-direction: column;
   gap: 6px;
   text-align: left;
+  /* Grid blowout guard: a grid item's automatic min-width is its min-content
+     (the widest unbreakable line); long CJK/URL text would otherwise stretch
+     the card past its track (the 百分浏览器 overflow). */
+  min-width: 0;
+  min-height: 128px;
   padding: 10px 12px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 12px;
@@ -262,10 +267,15 @@ html[data-dsh-timeragent-active]:not([data-dsh-ssh-active]):not([data-dsh-taskbo
 .cardTitle {
   font-size: 13px;
   font-weight: 600;
+  line-height: 1.4;
   color: var(--dsw-alias-label-primary);
+  /* Wrap up to 2 lines; the rest is hidden (multi-line clamp). */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .jobCard[data-status='archived'] .cardTitle {
@@ -274,10 +284,15 @@ html[data-dsh-timeragent-active]:not([data-dsh-ssh-active]):not([data-dsh-taskbo
 
 .cardExcerpt {
   font-size: 12px;
+  line-height: 1.45;
   color: var(--dsw-alias-label-secondary);
+  /* Wrap up to 3 lines inside the taller card; the rest is hidden. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .cardMeta {
