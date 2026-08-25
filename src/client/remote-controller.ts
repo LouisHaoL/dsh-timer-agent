@@ -187,8 +187,20 @@ export class RemoteBoardController {
       }
     }
     const refresh = this.sessions.refresh
-    if (refresh === undefined) open()
-    else void Promise.resolve(refresh.call(this.sessions)).then(open, open)
+    if (refresh === undefined) {
+      open()
+      return
+    }
+    // Call the face's refresh WITHOUT redelivery of `this`: the adapter's
+    // closure is already bound to the concrete service, while the service's
+    // own refresh is a prototype method whose `this` must be the service —
+    // refresh.call(this.sessions) crashes with "Cannot read properties of
+    // undefined (reading 'manager')" and the open() below never runs.
+    try {
+      void Promise.resolve(refresh()).then(open, open)
+    } catch {
+      open()
+    }
   }
 
   /** Fire now (host runs it in the background). */
