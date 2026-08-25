@@ -24,7 +24,7 @@ import type {
   HostAgent, HostAgentHandle, HostPluginContext, HostRoute,
   NodeIncomingMessage, NodeServerResponse,
 } from '../src/host/contracts.ts'
-import { createJob, withSchedule, type JobRecord } from '../src/core/jobs.ts'
+import { createJob, normalizeTimeoutMs, timeoutLabel, withSchedule, type JobRecord } from '../src/core/jobs.ts'
 
 let passed = 0
 let failed = 0
@@ -89,7 +89,7 @@ const store = new HostJobStore(join(tempDir, 'jobs.json'))
 // ============================================================================
 section('TimerRunner: due firing + at-most-once')
 
-interface FakeCall { kind: 'create' | 'resume' | 'followup' | 'dispose'; sessionId?: string; prompt?: string; cwd?: string }
+interface FakeCall { kind: 'create' | 'resume' | 'followup' | 'dispose' | 'cancel'; sessionId?: string; prompt?: string; cwd?: string }
 
 function makeFakeHost(): { ctx: HostPluginContext; calls: FakeCall[]; emit: (sessionId: string, type: string, data: unknown) => void } {
   const calls: FakeCall[] = []
@@ -105,7 +105,7 @@ function makeFakeHost(): { ctx: HostPluginContext; calls: FakeCall[]; emit: (ses
         // stash the message id so the test can emit its user/message + turn/end
         ;(agent as unknown as { lastMessageId?: string }).lastMessageId = message.id
       },
-      cancel: () => {},
+      cancel: () => { calls.push({ kind: 'cancel', sessionId }) },
     }
     return {
       agent,
@@ -253,6 +253,88 @@ section('TimerRunner: workdir passes cwd to agents.create')
 }
 
 // ============================================================================
+// 3b. run timeout (normalize + runner enforcement)
+// ============================================================================
+section('timeout: normalize + labels')
+check('normalize passes positive ms through', normalizeTimeoutMs(90_000) === 90_000)
+check('normalize rounds fractional ms', normalizeTimeoutMs(90_499.6) === 90_500)
+check('normalize clears zero / negative / NaN / junk',
+  normalizeTimeoutMs(0) === undefined && normalizeTimeoutMs(-5) === undefined
+  && normalizeTimeoutMs(Number.NaN) === undefined && normalizeTimeoutMs('10' as unknown) === undefined)
+{
+  const base = { title: 't', description: '', prompt: 'p', target: { workdir: '', sessionId: '' } }
+  const withLimit = { ...createJob(base, 0, 'x'), timeoutMs: 90_000 }
+  const unlimited = createJob(base, 0, 'y')
+  check('label: 90s → 1.5m', timeoutLabel(withLimit) === '1.5m')
+  check('label: 120000ms → 2m', timeoutLabel({ ...withLimit, timeoutMs: 120_000 }) === '2m')
+  check('label: 30000ms → 30s', timeoutLabel({ ...withLimit, timeoutMs: 30_000 }) === '30s')
+  check('label: absent → dash', timeoutLabel(unlimited) === '—')
+}
+
+section('TimerRunner: run timeout cancels + settles failed')
+{
+  const host = makeFakeHost()
+  const s = new HostJobStore(join(tempDir, 'timeout.json'))
+  // Half-past the hour: an hourly cron's next slot is a full hour away, so
+  // the +121s timeout pass cannot coincide with the next scheduled fire.
+  let now = Date.UTC(2026, 0, 1, 0, 30, 0)
+  const runner = new TimerRunner({ ctx: host.ctx, store: s, now: () => now })
+  runner.start()
+  runner.stop()
+
+  let job = createJob({ title: 'slow', description: '', prompt: 'never finishes', target: { workdir: '', sessionId: '' } }, now, 'job-t1')
+  job = withSchedule(job, { enabled: true, cron: '0 * * * *', nextRunAt: now - 1 }, now)
+  job = { ...job, timeoutMs: 120_000 } // 2 minutes
+  await s.mutate(jobs => ({ jobs: [...jobs, job], result: true }))
+
+  await runner.tick()
+  await new Promise(r => setTimeout(r, 25))
+  check('timeout job fired', host.calls.some(c => c.kind === 'followup' && c.prompt === 'never finishes'))
+  check('not yet timed out (deadline in the future)', (await s.load())[0]?.status === 'running')
+
+  now += 121_000 // past the deadline
+  await runner.tick()
+  await new Promise(r => setTimeout(r, 25))
+  const timedOut = (await s.load())[0]
+  check('timeout settles failed with reason', timedOut?.status === 'failed'
+    && timedOut?.executions[0]?.result === 'failed'
+    && typeof timedOut?.executions[0]?.error === 'string' && timedOut.executions[0].error.includes('timed out'),
+    `${timedOut?.status}/${timedOut?.executions[0]?.error}`)
+
+  // A late turn/end cannot double-settle the timed-out execution.
+  const created = host.calls.find(c => c.kind === 'create')
+  const agent = host.agentOf(created!.sessionId!)
+  const messageId = (agent as unknown as { lastMessageId?: string }).lastMessageId
+  host.emit(created!.sessionId!, 'user/message', { id: messageId })
+  host.emit(created!.sessionId!, 'turn/end', { turn: 1, reason: { kind: 'stop' } })
+  await new Promise(r => setTimeout(r, 25))
+  const late = (await s.load())[0]
+  check('late turn/end does not resurrect the run', late?.status === 'failed' && late?.executions.length === 1
+    && late?.executions[0]?.result === 'failed')
+}
+
+section('TimerRunner: unlimited runs never time out')
+{
+  const host = makeFakeHost()
+  const s = new HostJobStore(join(tempDir, 'notimeout.json'))
+  let now = Date.UTC(2026, 0, 1, 0, 30, 0)
+  const runner = new TimerRunner({ ctx: host.ctx, store: s, now: () => now })
+  runner.start()
+  runner.stop()
+
+  let job = createJob({ title: 'endless', description: '', prompt: 'x', target: { workdir: '', sessionId: '' } }, now, 'job-t2')
+  job = withSchedule(job, { enabled: true, cron: '0 * * * *', nextRunAt: now - 1 }, now)
+  await s.mutate(jobs => ({ jobs: [...jobs, job], result: true }))
+  await runner.tick()
+  await new Promise(r => setTimeout(r, 25))
+  now += 10 * 60_000 // past where a short timeout would have fired
+  await runner.tick()
+  await new Promise(r => setTimeout(r, 25))
+  check('no timeout configured → still running', (await s.load())[0]?.status === 'running')
+  check('no cancel was issued', !host.calls.some(c => c.kind === 'cancel'))
+}
+
+// ============================================================================
 // 4. timer_agent tool
 // ============================================================================
 section('timer_agent tool actions')
@@ -277,11 +359,12 @@ section('timer_agent tool actions')
   check('create with invalid cron rejected', typeof badCron.error === 'string')
 
   // good create
-  const created = await tool.execute({ action: 'create', name: 'daily', prompt: 'standup', schedule: '0 9 * * *' }) as { job?: { id?: string } }
+  const created = await tool.execute({ action: 'create', name: 'daily', prompt: 'standup', schedule: '0 9 * * *', timeout_minutes: 5 }) as { job?: { id?: string } }
   const jobId = created.job?.id
   check('create returns job summary', typeof jobId === 'string' && jobId !== '')
   const row = (await s.load())[0]
   check('create persisted armed schedule', row?.schedule?.enabled === true && row?.schedule?.cron === '0 9 * * *')
+  check('create persisted timeout_minutes=5 → 300000ms', row?.timeoutMs === 300_000, `${row?.timeoutMs}`)
 
   // list
   const listed = await tool.execute({ action: 'list' }) as { jobs?: unknown[] }
@@ -298,6 +381,10 @@ section('timer_agent tool actions')
   await tool.execute({ action: 'update', job_id: jobId, prompt: 'new prompt', schedule: '*/30 * * * *' })
   const updated = (await s.load())[0]
   check('update changes prompt + cron', updated?.prompt === 'new prompt' && updated?.schedule?.cron === '*/30 * * * *')
+  await tool.execute({ action: 'update', job_id: jobId, timeout_minutes: 0 })
+  check('update timeout_minutes=0 clears the limit', (await s.load())[0]?.timeoutMs === undefined)
+  await tool.execute({ action: 'update', job_id: jobId, timeout_minutes: 2 })
+  check('update timeout_minutes=2 → 120000ms', (await s.load())[0]?.timeoutMs === 120_000)
   const badUpdate = await tool.execute({ action: 'update', job_id: 'nope', prompt: 'x' }) as { error?: string }
   check('update unknown id rejected', typeof badUpdate.error === 'string')
 
@@ -371,6 +458,20 @@ section('HTTP routes: handlers + loopback fence')
     && cronEditedJob.schedule?.cron === '0 10 * * *'
     && cronEditedJob.schedule?.nextRunAt === nextRunAtMs('0 10 * * *', now),
   `${cronEdited.status} ${cronEditedJob.schedule?.nextRunAt}`)
+
+  // POST/PATCH timeoutMinutes
+  const toCreated = makeRes()
+  await jobsRoute.handler(makeReq('POST', '/api/dsh-timer-agent/jobs', { title: 'to-job', timeoutMinutes: 3 }), toCreated.res)
+  const toId = (JSON.parse(toCreated.body).job as JobRecord).id
+  check('POST /jobs persists timeoutMinutes=3', toCreated.status === 201
+    && (JSON.parse(toCreated.body).job as JobRecord).timeoutMs === 180_000)
+  const toPatched = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${toId}`, { timeoutMinutes: 0 }), toPatched.res)
+  check('PATCH timeoutMinutes=0 clears', toPatched.status === 200 && (JSON.parse(toPatched.body).job as JobRecord).timeoutMs === undefined)
+  const toPatched2 = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${toId}`, { timeoutMinutes: 12 }), toPatched2.res)
+  check('PATCH timeoutMinutes=12 sets 720000ms', (JSON.parse(toPatched2.body).job as JobRecord).timeoutMs === 720_000)
+  await jobsRoute.handler(makeReq('DELETE', `/api/dsh-timer-agent/jobs?id=${toId}`), makeRes().res)
 
   // POST run
   const ran = makeRes()

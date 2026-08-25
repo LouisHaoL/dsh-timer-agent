@@ -116,8 +116,32 @@ export interface JobRecord {
    * browser/tool → host command channel through the shared ledger.
    */
   runRequestedAt?: number
+  /**
+   * Per-job execution timeout (ms, positive): a run still in flight past
+   * its deadline is cancelled and settled failed. Absent/zero → no limit
+   * (n8n / cron-job.org parity).
+   */
+  timeoutMs?: number
   /** Scheduled-run rule (absent on jobs without a schedule). */
   schedule?: ScheduleRule
+}
+
+/**
+ * Normalize a timeout input (ms) into the stored shape: positive finite
+ * numbers pass through (rounded), everything else (0, negative, NaN,
+ * non-number) clears the limit.
+ */
+export function normalizeTimeoutMs(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined
+  return Math.round(value)
+}
+
+/** Human timeout label for detail surfaces ('—' when unlimited). */
+export function timeoutLabel(job: JobRecord): string {
+  if (job.timeoutMs === undefined) return '—'
+  if (job.timeoutMs < 60_000) return `${job.timeoutMs / 1000}s`
+  const minutes = job.timeoutMs / 60_000
+  return Number.isInteger(minutes) ? `${minutes}m` : `${minutes.toFixed(1)}m`
 }
 
 /** Input for creating a job. */

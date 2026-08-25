@@ -19,7 +19,7 @@ import type {
   HostPluginContext, HostRoute, NodeIncomingMessage, NodeServerResponse,
 } from './contracts.ts'
 import { isValidCron, nextRunAtMs } from '../core/schedule.ts'
-import { createJob, withSchedule, withStatus, type JobModelSelection, type JobRecord } from '../core/jobs.ts'
+import { createJob, normalizeTimeoutMs, withSchedule, withStatus, type JobModelSelection, type JobRecord } from '../core/jobs.ts'
 import type { HostJobStore } from './store.ts'
 import type { TimerRunner } from './runner.ts'
 
@@ -160,6 +160,11 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
           },
           ...modelSelection === undefined ? {} : { modelSelection },
         }, deps.now(), randomUUID())
+        if (typeof body.timeoutMinutes === 'number') {
+          const timeoutMs = normalizeTimeoutMs(body.timeoutMinutes * 60_000)
+          if (timeoutMs === undefined) delete job.timeoutMs
+          else job = { ...job, timeoutMs }
+        }
         if (armCron) {
           job = withSchedule(job, { enabled: true, cron, nextRunAt: nextRunAtMs(cron, deps.now()) }, deps.now())
         }
@@ -185,6 +190,11 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
           if (typeof body.title === 'string' && body.title.trim() !== '') next = { ...next, title: body.title.trim() }
           if (typeof body.description === 'string') next = { ...next, description: body.description }
           if (typeof body.prompt === 'string') next = { ...next, prompt: body.prompt }
+          if ('timeoutMinutes' in body && typeof body.timeoutMinutes === 'number') {
+            const timeoutMs = normalizeTimeoutMs(body.timeoutMinutes * 60_000)
+            if (timeoutMs === undefined) delete next.timeoutMs
+            else next = { ...next, timeoutMs }
+          }
           if ('modelSelection' in body) {
             const modelSelection = readModelSelection(body.modelSelection)
             if (modelSelection === 'invalid') return undefined
