@@ -12,6 +12,7 @@
  * plugin must not take the GUI down.
  */
 import { RemoteBoardController } from './remote-controller.ts'
+import { sessionsFaceOf, type SessionsServiceShape } from './sessions-face.ts'
 import { mountBoard } from './board-mount.tsx'
 import { mountSidebarEntry } from './sidebar-entry.ts'
 import { listTargetOptions } from './target-options.ts'
@@ -24,34 +25,13 @@ export const inject = ['slots', 'sessions']
  * @param ctx - client root context (services: sessions).
  */
 export function apply(ctx: unknown): void {
-  const sessions = ctx as {
-    list: { getSnapshot(): { current: string | undefined }; subscribe(fn: () => void): () => void }
-    open(id: string): void
-  }
-
-  // Adapt the sessions service to SessionsControllerFace.
-  // The sessions.list is an ObservableSnapshot with getSnapshot/subscribe,
-  // and sessions.open opens a session by id.
-  const sessionsFace: import('../core/controller.js').SessionsControllerFace = {
-    list: {
-      getSnapshot: () => {
-        const snapshot = sessions.list.getSnapshot()
-        return { current: snapshot.current }
-      },
-      subscribe: (fn: () => void) => {
-        return sessions.list.subscribe(fn)
-      },
-    },
-    open: (id: string) => {
-      sessions.open(id)
-    },
-    // Forward the list re-pull when the service offers it (headlessly
-    // created run sessions are invisible to a stale mirror; see
-    // remote-controller.openSession).
-    ...(typeof (sessions as { refresh?: unknown }).refresh === 'function'
-      ? { refresh: () => (sessions as unknown as { refresh(): Promise<void> }).refresh() }
-      : {}),
-  }
+  // Resolve the sessions SERVICE once through the inject declaration. The
+  // ctx object is a Cordis proxy where only `inject` names resolve — reading
+  // service members (list/open/refresh) straight off it throws "cannot get
+  // property ... without inject", and an eager read at apply time fails the
+  // whole web boot. Everything downstream works on the plain service object.
+  const sessions = (ctx as { sessions: SessionsServiceShape }).sessions
+  const sessionsFace = sessionsFaceOf(sessions)
 
   const controller = new RemoteBoardController(sessionsFace)
   controller.start()
