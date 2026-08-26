@@ -12,12 +12,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { isValidCron, nextRunAtMs } from '../../core/schedule.ts'
 import { timeoutLabel, type ExecutionRecord, type JobRecord } from '../../core/jobs.ts'
-import type { TargetGroup } from '../target-options.ts'
+import type { TargetGroup, ModelOptions } from '../target-options.ts'
 import type { BoardControllerFace } from '../controller-face.ts'
 import { t, type TimerAgentKey } from '../locales.ts'
 import css from '../board.module.css'
 import { formatTime, STATUS_LABEL_KEY } from './TimerBoard.tsx'
-import { DEFAULT_TARGET_GROUPS, leavesOf, TargetTree } from './NewJobModal.tsx'
+import { DEFAULT_TARGET_GROUPS, leavesOf, modelLeavesOf, TargetTree } from './NewJobModal.tsx'
 
 /** Execution outcome → locale key. */
 const RESULT_KEY: Record<NonNullable<ExecutionRecord['result']>, TimerAgentKey> = {
@@ -111,8 +111,16 @@ function Confirm({ message, confirmLabel, onConfirm, onCancel }: {
   )
 }
 
+/** Human label for a job's current model resolution. */
+function modelLabel(job: JobRecord): string {
+  if (job.modelSelection !== undefined) {
+    return `${job.modelSelection.provider} · ${job.modelSelection.model}`
+  }
+  return job.target.sessionId !== '' ? t('new.model.followSession') : t('new.model.followDefault')
+}
+
 /** Job detail overlay. */
-export function JobDetail({ controller, job, targetOptions }: { controller: BoardControllerFace; job: JobRecord; targetOptions: () => Promise<TargetGroup[]> }) {
+export function JobDetail({ controller, job, targetOptions, modelOptions }: { controller: BoardControllerFace; job: JobRecord; targetOptions: () => Promise<TargetGroup[]>; modelOptions: () => Promise<ModelOptions> }) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const running = job.status === 'running'
   const archived = job.status === 'archived'
@@ -134,6 +142,8 @@ export function JobDetail({ controller, job, targetOptions }: { controller: Boar
   const [cronDraft, setCronDraft] = useState(current.schedule?.cron ?? '0 9 * * *')
   const [scheduleEnabledDraft, setScheduleEnabledDraft] = useState(current.schedule?.enabled ?? false)
   const [timeoutDraft, setTimeoutDraft] = useState(current.timeoutMs !== undefined ? String(Math.round(current.timeoutMs / 60_000)) : '')
+  const [modelOptionsState, setModelOptionsState] = useState<ModelOptions>({ groups: [] })
+  const [modelKey, setModelKey] = useState('')
   const [error, setError] = useState<string | undefined>(undefined)
 
   /** All leaves across groups, for resolving the current selection. */
@@ -160,6 +170,10 @@ export function JobDetail({ controller, job, targetOptions }: { controller: Boar
     setTimeoutDraft(current.timeoutMs !== undefined ? String(Math.round(current.timeoutMs / 60_000)) : '')
     setError(undefined)
     setSaving(false)
+    // Model picker: '' = follow default/session, else provider\u0000model.
+    const sel = current.modelSelection
+    setModelKey(sel === undefined ? '' : `${sel.provider}\u0000${sel.model}`)
+    void modelOptions().then(next => { setModelOptionsState(next) }).catch(() => undefined)
     void targetOptions().then(next => {
       const loaded = next.length > 0 ? next : DEFAULT_TARGET_GROUPS
       setGroups(loaded)
@@ -193,12 +207,26 @@ export function JobDetail({ controller, job, targetOptions }: { controller: Boar
     setSaving(true)
     // Blank / 0 / negative timeout clears the limit (host normalizes).
     const timeoutMinutes = timeoutDraft.trim() === '' ? 0 : Number(timeoutDraft)
+    // Model picker resolution: untouched → omit (keep stored); '' → clear
+    // (null); a leaf → pin it. A stored override absent from the live catalog
+    // still resolves to "untouched" so it is never silently dropped.
+    const initialKey = current.modelSelection === undefined
+      ? ''
+      : `${current.modelSelection.provider}\u0000${current.modelSelection.model}`
+    const modelLeaves = modelLeavesOf(modelOptionsState)
+    const leaf = modelLeaves.find(item => item.key === modelKey)
+    const modelSelection = modelKey === initialKey
+      ? undefined
+      : modelKey === ''
+        ? null
+        : leaf === undefined ? undefined : { provider: leaf.provider, model: leaf.model }
     void Promise.resolve(controller.updateJob(current.id, {
       prompt: promptDraft,
       target: { workdir: selectedTarget.workdir, sessionId: selectedTarget.sessionId },
       cron,
       scheduleEnabled: scheduleEnabledDraft,
       ...(Number.isFinite(timeoutMinutes) ? { timeoutMinutes } : {}),
+      ...(modelSelection !== undefined ? { modelSelection } : {}),
     })).then(() => {
       setEditing(false)
       setSaving(false)
@@ -288,6 +316,42 @@ export function JobDetail({ controller, job, targetOptions }: { controller: Boar
               </>
             ) : (
               <p className={css.detailText}>{targetLabel(current)}</p>
+            )}
+          </section>
+
+          <section className={css.detailSection}>
+            <h4>{t('new.model')}</h4>
+            {editing ? (
+              (() => {
+                const leaves = modelLeavesOf(modelOptionsState)
+                const modelDefaultLabel = selectedTarget.sessionId !== ''
+                  ? t('new.model.followSession')
+                  : modelOptionsState.default !== undefined
+                    ? `${modelOptionsState.default.provider} · ${modelOptionsState.default.model}（${t('new.model.followDefault')}）`
+                    : t('new.model.followDefault')
+                const known = modelKey === '' || leaves.some(item => item.key === modelKey)
+                return (
+                  <select
+                    className={css.input}
+                    style={{ width: '100%' }}
+                    value={modelKey}
+                    aria-label={t('new.model')}
+                    onChange={event => { setModelKey(event.target.value) }}
+                  >
+                    <option value="">{modelDefaultLabel}</option>
+                    {!known && current.modelSelection !== undefined && (
+                      <option value={modelKey}>
+                        {current.modelSelection.provider} · {current.modelSelection.model}
+                      </option>
+                    )}
+                    {leaves.map(item => (
+                      <option key={item.key} value={item.key}>{item.label}</option>
+                    ))}
+                  </select>
+                )
+              })()
+            ) : (
+              <p className={css.detailText}>{modelLabel(current)}</p>
             )}
           </section>
 

@@ -5,7 +5,7 @@
  * controller's class.
  */
 import type { ControllerSnapshot } from '../core/controller.ts'
-import type { JobRecord, NewJobInput, SessionTarget } from '../core/jobs.ts'
+import type { JobModelSelection, JobRecord, NewJobInput, SessionTarget } from '../core/jobs.ts'
 
 /** Structural face for TimerBoard / JobDetail / NewJobModal. */
 export interface BoardControllerFace {
@@ -17,7 +17,7 @@ export interface BoardControllerFace {
   openJob(id: string): void
   closeJob(): void
   createJob(input: NewJobInput): Promise<JobRecord | undefined> | JobRecord | undefined
-  updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt'>> & { target?: SessionTarget; cron?: string; scheduleEnabled?: boolean; timeoutMinutes?: number }): Promise<void> | void
+  updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt'>> & { target?: SessionTarget; cron?: string; scheduleEnabled?: boolean; timeoutMinutes?: number; modelSelection?: JobModelSelection | null }): Promise<void> | void
   deleteJob(id: string): Promise<void> | void
   resetJob(id: string): Promise<void> | void
   /** Freeze a job: no schedule fires, no manual runs (host refuses while running). */

@@ -154,7 +154,7 @@ export function TimerBoard({ controller, targetOptions, modelOptions }: { contro
       </div>
 
       {selected !== undefined && (
-        <JobDetail controller={controller} job={selected} targetOptions={targetOptions} />
+        <JobDetail controller={controller} job={selected} targetOptions={targetOptions} modelOptions={modelOptions} />
       )}
       {showNew && (
         <NewJobModal

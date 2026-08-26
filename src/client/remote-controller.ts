@@ -12,7 +12,7 @@
 import type {
   ControllerSnapshot, SessionsControllerFace,
 } from '../core/controller.ts'
-import type { JobRecord, NewJobInput, SessionTarget } from '../core/jobs.ts'
+import type { JobModelSelection, JobRecord, NewJobInput, SessionTarget } from '../core/jobs.ts'
 
 /** The sessions navigation face (ctx.sessions.open for transcript jumps). */
 export type { SessionsControllerFace }
@@ -128,9 +128,12 @@ export class RemoteBoardController {
     this.pendingCreateCron = cron
   }
 
-  async updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt'>> & { target?: SessionTarget; cron?: string; scheduleEnabled?: boolean; timeoutMinutes?: number }): Promise<void> {
+  async updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt'>> & { target?: SessionTarget; cron?: string; scheduleEnabled?: boolean; timeoutMinutes?: number; modelSelection?: JobModelSelection | null }): Promise<void> {
     const body: Record<string, unknown> = { ...patch }
     if (patch.timeoutMinutes !== undefined) body.timeoutMinutes = patch.timeoutMinutes
+    // modelSelection: object pins a model, null clears it (host deletes the
+    // field); omitting it leaves the stored selection untouched.
+    if (patch.modelSelection === undefined) delete body.modelSelection
     await this.fetchJson('PATCH', `/api/dsh-timer-agent/jobs?id=${encodeURIComponent(id)}`, body)
     await this.refresh()
   }

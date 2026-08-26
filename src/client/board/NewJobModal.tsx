@@ -111,7 +111,7 @@ export function TargetTree({ groups, expanded, selectedKey, onToggle, onSelect }
 }
 
 /** Flatten provider groups into selectable model leaves. */
-function modelLeavesOf(options: ModelOptions): ModelLeaf[] {
+export function modelLeavesOf(options: ModelOptions): ModelLeaf[] {
   const leaves: ModelLeaf[] = []
   for (const group of options.groups) {
     for (const model of group.models) {

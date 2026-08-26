@@ -57,7 +57,7 @@ export function apply(ctx: unknown): void {
         return listTargetOptions(ctx as never)
       } catch (error) {
         console.warn('[dsh-timer-agent] target-options failed, returning empty:', error)
-        return []
+        return Promise.resolve([])
       }
     }
     disposers.push(mountSidebarEntry(controller))
