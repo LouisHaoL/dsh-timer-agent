@@ -16,6 +16,14 @@ At each cron due point (5-field cron) it executes your prompt through a **real a
 
 Manage jobs right from any conversation with the `timer_agent` tool (create / list / update / pause / resume / remove / run); the web GUI sidebar「定时任务」panel manages the same jobs — **one ledger, three doorways** (tool / WebUI / file).
 
+## Two job kinds
+
+- **AI Agent job** (default): each fire drives a real agent session executing your prompt; consumes API quota
+- **Command job**: each fire spawns `command + args` you specify (optional workdir and timeout) — **no AI, no quota**; exit code plus the tail (≤16k chars) of stdout/stderr lands on the execution record. Great for self-contained scripts (downloads, exports, credential renewal)
+
+> [!WARNING]
+> **Command jobs execute arbitrary commands on your machine with your current user privileges — no sandbox, no allowlist.** Anyone who can create/edit jobs (you, any agent session able to call the `timer_agent` tool, any local process that can reach the loopback API) can schedule arbitrary programs. Only schedule commands you have reviewed and that are safe to run unattended; do not expose this plugin to untrusted environments; a tampered `jobs.json` ledger is equivalent to arbitrary local code execution. **Use with care.**
+
 ## Architecture (isomorphic to hermes-agent cron)
 
 ```
