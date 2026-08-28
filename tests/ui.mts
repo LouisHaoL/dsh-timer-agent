@@ -56,14 +56,16 @@ function fixture(): JobRecord[] {
 {
   const jobs = fixture()
   const counts = tabCounts(jobs)
-  check('counts: all = total', counts.all === 6)
+  check('counts: all = total minus archived', counts.all === 5)
   check('counts: idle 1 / running 2 / done 1 / failed 1 / archived 1',
     counts.idle === 1 && counts.running === 2 && counts.done === 1 && counts.failed === 1 && counts.archived === 1,
     JSON.stringify(counts))
   check('counts over empty ledger are all zero with every key present',
     Object.values(tabCounts([])).every(value => value === 0) && Object.keys(tabCounts([])).length === BOARD_TABS.length)
 
-  check('jobsOfTab all returns everything in order', jobsOfTab(jobs, 'all').length === 6 && jobsOfTab(jobs, 'all')[0].id === 'id-a')
+  check('jobsOfTab all excludes archived, keeps order',
+    jobsOfTab(jobs, 'all').length === 5 && jobsOfTab(jobs, 'all')[0].id === 'id-a'
+      && !jobsOfTab(jobs, 'all').some(job => job.id === 'id-f'))
   check('jobsOfTab running picks only running', jobsOfTab(jobs, 'running').map(job => job.id).join() === 'id-b,id-c')
   check('jobsOfTab idle picks the idle one', jobsOfTab(jobs, 'idle').map(job => job.id).join() === 'id-a')
   check('jobsOfTab on an empty status is empty', jobsOfTab(jobs.filter(job => job.status !== 'archived'), 'archived').length === 0)
