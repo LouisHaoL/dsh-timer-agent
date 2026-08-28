@@ -112,6 +112,9 @@ export class RemoteBoardController {
       target: input.target,
       ...input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection },
       ...(cron !== undefined ? { cron } : {}),
+      ...(input.kind === 'command'
+        ? { kind: 'command', command: input.command ?? '', args: input.args ?? '' }
+        : {}),
     })
     if (response === undefined || response.error !== undefined) return undefined
     await this.refresh()
@@ -128,7 +131,7 @@ export class RemoteBoardController {
     this.pendingCreateCron = cron
   }
 
-  async updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt'>> & { target?: SessionTarget; cron?: string; scheduleEnabled?: boolean; timeoutMinutes?: number; modelSelection?: JobModelSelection | null }): Promise<void> {
+  async updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt' | 'command' | 'args'>> & { target?: SessionTarget; cron?: string; scheduleEnabled?: boolean; timeoutMinutes?: number; modelSelection?: JobModelSelection | null }): Promise<void> {
     const body: Record<string, unknown> = { ...patch }
     if (patch.timeoutMinutes !== undefined) body.timeoutMinutes = patch.timeoutMinutes
     // modelSelection: object pins a model, null clears it (host deletes the

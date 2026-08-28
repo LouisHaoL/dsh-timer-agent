@@ -144,6 +144,13 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
           writeJson(res, 400, { error: `invalid cron expression: ${cron}` })
           return
         }
+        const kind = body.kind === 'command' ? 'command' : 'agent'
+        const command = typeof body.command === 'string' ? body.command.trim() : ''
+        const args = typeof body.args === 'string' ? body.args : ''
+        if (kind === 'command' && command === '') {
+          writeJson(res, 400, { error: 'command is required for command jobs' })
+          return
+        }
         const target = (typeof body.target === 'object' && body.target !== null ? body.target : {}) as Record<string, unknown>
         const modelSelection = readModelSelection(body.modelSelection)
         if (modelSelection === 'invalid') {
@@ -154,6 +161,7 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
           title,
           description: typeof body.description === 'string' ? body.description : '',
           prompt: typeof body.prompt === 'string' ? body.prompt : '',
+          ...(kind === 'command' ? { kind: 'command' as const, command, args } : {}),
           target: {
             workdir: typeof target.workdir === 'string' ? target.workdir.trim() : '',
             sessionId: typeof target.sessionId === 'string' ? target.sessionId.trim() : '',
@@ -190,6 +198,34 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
           if (typeof body.title === 'string' && body.title.trim() !== '') next = { ...next, title: body.title.trim() }
           if (typeof body.description === 'string') next = { ...next, description: body.description }
           if (typeof body.prompt === 'string') next = { ...next, prompt: body.prompt }
+          // Kind switch (agent ↔ command) and/or command-line edits. A command
+          // job must keep a non-empty command; switching to agent clears the
+          // exec fields.
+          if (body.kind === 'command') {
+            const command = typeof body.command === 'string' ? body.command.trim() : (next.command ?? '')
+            if (command === '') return undefined
+            next = {
+              ...next,
+              kind: 'command',
+              command,
+              args: typeof body.args === 'string' ? body.args : (next.args ?? ''),
+            }
+          } else if (body.kind === 'agent') {
+            next = { ...next }
+            delete next.kind
+            delete next.command
+            delete next.args
+          } else if (body.command !== undefined || body.args !== undefined) {
+            if (next.kind !== 'command') return undefined
+            const command = typeof body.command === 'string' ? body.command.trim() : (next.command ?? '')
+            if (command === '') return undefined
+            next = {
+              ...next,
+              kind: 'command',
+              command,
+              args: typeof body.args === 'string' ? body.args : (next.args ?? ''),
+            }
+          }
           if ('timeoutMinutes' in body && typeof body.timeoutMinutes === 'number') {
             const timeoutMs = normalizeTimeoutMs(body.timeoutMinutes * 60_000)
             if (timeoutMs === undefined) delete next.timeoutMs

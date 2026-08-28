@@ -11,7 +11,7 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import { isValidCron, nextRunAtMs } from '../../core/schedule.ts'
-import { timeoutLabel, type ExecutionRecord, type JobRecord } from '../../core/jobs.ts'
+import { commandLine, jobKind, timeoutLabel, type ExecutionRecord, type JobRecord } from '../../core/jobs.ts'
 import type { TargetGroup, ModelOptions } from '../target-options.ts'
 import type { BoardControllerFace } from '../controller-face.ts'
 import { t, type TimerAgentKey } from '../locales.ts'
@@ -29,16 +29,22 @@ const RESULT_KEY: Record<NonNullable<ExecutionRecord['result']>, TimerAgentKey> 
 /** One execution-history row. */
 function ExecutionRow({ execution, onOpen }: { execution: ExecutionRecord; onOpen: (sessionId: string) => void }) {
   const result = execution.result
+  const isCommand = execution.targeting === 'command'
   return (
     <li className={css.executionRow} data-result={result}>
       <span className={css.executionBadge} data-result={result}>
         {result === undefined ? t('detail.result.running') : t(RESULT_KEY[result])}
       </span>
       <span className={css.executionTimes}>
-        {execution.targeting === 'specified-session' ? `(${t('detail.target.session')})` : `(${t('detail.target.new')})`}
+        {isCommand
+          ? `(${t('detail.execution.command')})`
+          : execution.targeting === 'specified-session'
+            ? `(${t('detail.target.session')})`
+            : `(${t('detail.target.new')})`}
         {' '}
         {t('detail.executionStarted')} {formatTime(execution.startedAt)}
         {execution.endedAt !== undefined && ` · ${t('detail.executionEnded')} ${formatTime(execution.endedAt)}`}
+        {isCommand && execution.exitCode !== undefined && ` · ${t('detail.execution.exitCode')} ${execution.exitCode}`}
       </span>
       {execution.sessionId !== undefined && (
         <button
@@ -52,6 +58,12 @@ function ExecutionRow({ execution, onOpen }: { execution: ExecutionRecord; onOpe
       )}
       {execution.error !== undefined && execution.error !== '' && (
         <span className={css.executionError}>{execution.error}</span>
+      )}
+      {isCommand && execution.output !== undefined && execution.output !== '' && (
+        <details className={css.executionOutput}>
+          <summary>{t('detail.output')}</summary>
+          <pre className={css.outputBlock}>{execution.output}</pre>
+        </details>
       )}
     </li>
   )
@@ -131,11 +143,15 @@ export function JobDetail({ controller, job, targetOptions, modelOptions }: { co
   const current = latest
 
   const canEdit = !running && !archived
+  const isCommand = jobKind(current) === 'command'
 
   // --- unified edit state (drafts; nothing persists until 保存) ---------------
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [promptDraft, setPromptDraft] = useState(current.prompt)
+  const [commandDraft, setCommandDraft] = useState(current.command ?? '')
+  const [argsDraft, setArgsDraft] = useState(current.args ?? '')
+  const [workdirDraft, setWorkdirDraft] = useState(current.target.workdir)
   const [groups, setGroups] = useState<TargetGroup[]>(DEFAULT_TARGET_GROUPS)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set<string>())
   const [selectedKey, setSelectedKey] = useState('')
@@ -165,6 +181,9 @@ export function JobDetail({ controller, job, targetOptions, modelOptions }: { co
   /** Enter edit mode: stage drafts from the current record + load the tree. */
   const startEdit = (): void => {
     setPromptDraft(current.prompt)
+    setCommandDraft(current.command ?? '')
+    setArgsDraft(current.args ?? '')
+    setWorkdirDraft(current.target.workdir)
     setCronDraft(current.schedule?.cron ?? '0 9 * * *')
     setScheduleEnabledDraft(current.schedule?.enabled ?? false)
     setTimeoutDraft(current.timeoutMs !== undefined ? String(Math.round(current.timeoutMs / 60_000)) : '')
@@ -203,8 +222,30 @@ export function JobDetail({ controller, job, targetOptions, modelOptions }: { co
       setError(t('detail.schedule.invalid'))
       return
     }
+    if (isCommand && commandDraft.trim() === '') {
+      setError(t('new.commandRequired'))
+      return
+    }
     setError(undefined)
     setSaving(true)
+    if (isCommand) {
+      // Command jobs edit the exec line + workdir only.
+      void Promise.resolve(controller.updateJob(current.id, {
+        command: commandDraft,
+        args: argsDraft,
+        target: { workdir: workdirDraft.trim(), sessionId: '' },
+        cron,
+        scheduleEnabled: scheduleEnabledDraft,
+        ...(() => {
+          const timeoutMinutes = timeoutDraft.trim() === '' ? 0 : Number(timeoutDraft)
+          return Number.isFinite(timeoutMinutes) ? { timeoutMinutes } : {}
+        })(),
+      })).then(() => {
+        setEditing(false)
+        setSaving(false)
+      }).catch(() => { setSaving(false) })
+      return
+    }
     // Blank / 0 / negative timeout clears the limit (host normalizes).
     const timeoutMinutes = timeoutDraft.trim() === '' ? 0 : Number(timeoutDraft)
     // Model picker resolution: untouched → omit (keep stored); '' → clear
@@ -263,6 +304,9 @@ export function JobDetail({ controller, job, targetOptions, modelOptions }: { co
       <div className={css.detail} role="dialog" aria-label={t('detail.title')}>
         <header className={css.detailHeader}>
           <h2 className={css.detailTitle}>{current.title}</h2>
+          <span className={css.kindBadge} data-kind={isCommand ? 'command' : 'agent'}>
+            {isCommand ? `⌘ ${t('detail.kind.command')}` : t('detail.kind.agent')}
+          </span>
           <span className={css.statusBadge} data-status={current.status}>
             <span className={css.statusDot} aria-hidden="true" />
             {t(STATUS_LABEL_KEY[current.status])}
@@ -285,42 +329,93 @@ export function JobDetail({ controller, job, targetOptions, modelOptions }: { co
             </section>
           )}
 
-          <section className={css.detailSection}>
-            <h4>{t('detail.prompt')}</h4>
-            {editing ? (
-              <textarea
-                className={css.input}
-                style={{ width: '100%', minHeight: '160px', resize: 'vertical', fontFamily: 'inherit', lineHeight: '1.5', boxSizing: 'border-box' }}
-                value={promptDraft}
-                placeholder={t('new.promptPlaceholder')}
-                aria-label={t('detail.prompt')}
-                onChange={event => { setPromptDraft(event.target.value) }}
-              />
-            ) : (
-              <pre className={css.promptBlock}>{current.prompt !== '' ? current.prompt : current.title}</pre>
-            )}
-          </section>
-
-          <section className={css.detailSection}>
-            <h4>{t('new.target')}</h4>
-            {editing ? (
-              <>
-                <TargetTree
-                  groups={groups}
-                  expanded={expanded}
-                  selectedKey={selectedKey}
-                  onToggle={toggleGroup}
-                  onSelect={setSelectedKey}
+          {isCommand ? (
+            <section className={css.detailSection}>
+              <h4>{t('detail.command')}</h4>
+              {editing ? (
+                <>
+                  <label className={css.field}>
+                    <span className={css.fieldLabel}>{t('new.command')}</span>
+                    <input
+                      className={css.input}
+                      style={{ width: '100%' }}
+                      value={commandDraft}
+                      placeholder={t('new.commandPlaceholder')}
+                      aria-label={t('new.command')}
+                      spellCheck={false}
+                      onChange={event => { setCommandDraft(event.target.value); setError(undefined) }}
+                    />
+                  </label>
+                  <label className={css.field}>
+                    <span className={css.fieldLabel}>{t('new.args')}</span>
+                    <input
+                      className={css.input}
+                      style={{ width: '100%' }}
+                      value={argsDraft}
+                      placeholder={t('new.argsPlaceholder')}
+                      aria-label={t('new.args')}
+                      spellCheck={false}
+                      onChange={event => { setArgsDraft(event.target.value) }}
+                    />
+                  </label>
+                  <label className={css.field}>
+                    <span className={css.fieldLabel}>{t('new.workdir')}</span>
+                    <input
+                      className={css.input}
+                      style={{ width: '100%' }}
+                      value={workdirDraft}
+                      placeholder={t('new.workdirPlaceholder')}
+                      aria-label={t('new.workdir')}
+                      spellCheck={false}
+                      onChange={event => { setWorkdirDraft(event.target.value) }}
+                    />
+                  </label>
+                </>
+              ) : (
+                <pre className={css.promptBlock}>{commandLine(current)}</pre>
+              )}
+            </section>
+          ) : (
+            <section className={css.detailSection}>
+              <h4>{t('detail.prompt')}</h4>
+              {editing ? (
+                <textarea
+                  className={css.input}
+                  style={{ width: '100%', minHeight: '160px', resize: 'vertical', fontFamily: 'inherit', lineHeight: '1.5', boxSizing: 'border-box' }}
+                  value={promptDraft}
+                  placeholder={t('new.promptPlaceholder')}
+                  aria-label={t('detail.prompt')}
+                  onChange={event => { setPromptDraft(event.target.value) }}
                 />
-                <span className={css.fieldHint}>{t('new.target.hint')}</span>
-              </>
-            ) : (
-              <p className={css.detailText}>{targetLabel(current)}</p>
-            )}
-          </section>
+              ) : (
+                <pre className={css.promptBlock}>{current.prompt !== '' ? current.prompt : current.title}</pre>
+              )}
+            </section>
+          )}
 
-          <section className={css.detailSection}>
-            <h4>{t('new.model')}</h4>
+          {!isCommand && (
+            <section className={css.detailSection}>
+              <h4>{t('new.target')}</h4>
+              {editing ? (
+                <>
+                  <TargetTree
+                    groups={groups}
+                    expanded={expanded}
+                    selectedKey={selectedKey}
+                    onToggle={toggleGroup}
+                    onSelect={setSelectedKey}
+                  />
+                  <span className={css.fieldHint}>{t('new.target.hint')}</span>
+                </>
+              ) : (
+                <p className={css.detailText}>{targetLabel(current)}</p>
+              )}
+            </section>
+          )}
+
+          {!isCommand && (
+            <section className={css.detailSection}>
+              <h4>{t('new.model')}</h4>
             {editing ? (
               (() => {
                 const leaves = modelLeavesOf(modelOptionsState)
@@ -354,6 +449,7 @@ export function JobDetail({ controller, job, targetOptions, modelOptions }: { co
               <p className={css.detailText}>{modelLabel(current)}</p>
             )}
           </section>
+          )}
 
           <section className={css.detailSection}>
             <h4>{t('detail.schedule')}</h4>

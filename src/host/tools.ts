@@ -10,7 +10,10 @@
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import { randomUUID } from 'node:crypto'
 import { isValidCron, nextRunAtMs } from '../core/schedule.ts'
-import { createJob, normalizeTimeoutMs, withSchedule, withStatus, withRunRequest, type JobRecord } from '../core/jobs.ts'
+import {
+  createJob, jobKind, normalizeTimeoutMs, withSchedule, withStatus, withRunRequest,
+  type JobRecord,
+} from '../core/jobs.ts'
 import type { HostJobStore } from './store.ts'
 import type { TimerRunner } from './runner.ts'
 
@@ -39,9 +42,16 @@ function summarize(job: JobRecord): JsonValue {
     id: job.id,
     title: job.title,
     status: job.status,
-    target: job.target.sessionId !== ''
+    job_kind: jobKind(job),
+  }
+  if (jobKind(job) === 'command') {
+    result.command = job.command ?? ''
+    result.args = job.args ?? ''
+    if (job.target.workdir !== '') result.workdir = job.target.workdir
+  } else {
+    result.target = job.target.sessionId !== ''
       ? { session: job.target.sessionId }
-      : { workdir: job.target.workdir === '' ? '(default workspace)' : job.target.workdir, mode: 'new-session' },
+      : { workdir: job.target.workdir === '' ? '(default workspace)' : job.target.workdir, mode: 'new-session' }
   }
   if (schedule !== undefined) result.schedule = schedule as JsonValue
   if (job.timeoutMs !== undefined) result.timeout_minutes = Math.round(job.timeoutMs / 60_000)
@@ -49,7 +59,8 @@ function summarize(job: JobRecord): JsonValue {
     result.last_execution = {
       result: last.result ?? 'running',
       at: new Date(last.startedAt).toISOString(),
-      session: last.sessionId,
+      session: jobKind(job) === 'command' ? undefined : last.sessionId,
+      exit_code: last.exitCode,
     } as JsonValue
   }
   return result as JsonValue
@@ -65,11 +76,12 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
   return tools.register(defineTool({
     name: 'timer_agent',
     description: [
-      'Manage scheduled timer jobs that fire real agent sessions on a cron schedule (the dsh-timer-agent engine; the same jobs appear in the web GUI「定时任务」panel).',
-      "action='create' schedules a new job (requires schedule + prompt; prompt must be self-contained — scheduled runs get no current-chat context unless session is pinned).",
-      "action='list' shows all jobs; action='update' edits prompt/schedule/name; action='pause'/'resume' arms/disarms the schedule; action='archive' freezes a job (no schedule fires, no manual runs) and action='restart' un-archives it back to idle; action='remove' deletes; action='run' fires immediately in the background (returns at once; the run happens in its own session).",
+      'Manage scheduled timer jobs that fire on a cron schedule (the dsh-timer-agent engine; the same jobs appear in the web GUI「定时任务」panel).',
+      "Two job kinds: kind='agent' (default) fires a real agent session from a self-contained prompt; kind='command' (普通任务) directly spawns command+args with no AI — use it for scripts that just need a timer.",
+      "action='create' schedules a new job (requires schedule; agent jobs also require prompt — self-contained, scheduled runs get no current-chat context unless session is pinned; command jobs require command instead).",
+      "action='list' shows all jobs; action='update' edits prompt/schedule/name/command/args; action='pause'/'resume' arms/disarms the schedule; action='archive' freezes a job (no schedule fires, no manual runs) and action='restart' un-archives it back to idle; action='remove' deletes; action='run' fires immediately in the background (returns at once).",
       "schedule syntax: 5-field cron like '0 9 * * *' (min hour day month weekday).",
-      "session targeting: leave both workdir and session empty → each run starts a NEW conversation in the default workspace; pass session=<existing session id> → every run continues that conversation (continuity); pass workdir=<absolute project path> → new sessions run inside that project.",
+      "session targeting (agent jobs only): leave both workdir and session empty → each run starts a NEW conversation in the default workspace; pass session=<existing session id> → every run continues that conversation (continuity); pass workdir=<absolute project path> → new sessions run inside that project. For command jobs, workdir is the process cwd.",
       'Scheduled runs execute autonomously with no user present — prompts must not ask questions.',
     ].join('\n'),
     timeoutMs: 15000,
@@ -84,7 +96,19 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
       },
       prompt: {
         type: 'string',
-        description: "For create: the full self-contained prompt the scheduled run executes. For update: replacement prompt. For run: optional transient context appended for this single fire only.",
+        description: "For create: the full self-contained prompt the scheduled run executes (agent jobs only; required unless kind='command'). For update: replacement prompt. For run: optional transient context appended for this single fire only.",
+      },
+      kind: {
+        type: 'string',
+        description: "For create/update: job kind — 'agent' (default; AI session executes prompt) or 'command' (普通任务; spawns command+args directly, no AI).",
+      },
+      command: {
+        type: 'string',
+        description: "For create/update (kind='command'): the executable to spawn, e.g. 'pwsh', 'python', 'node', or an absolute path. Required for command jobs.",
+      },
+      args: {
+        type: 'string',
+        description: "For create/update (kind='command'): argument string for the command; whitespace-separated, supports \"double\"/'single' quoted groups. E.g. '-X utf8 temu_yh_yinhua.py' or '-Command \"echo hi\"'.",
       },
       schedule: {
         type: 'string',
@@ -129,6 +153,9 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
       action?: string
       job_id?: string
       prompt?: string
+      kind?: string
+      command?: string
+      args?: string
       schedule?: string
       name?: string
       workdir?: string
@@ -146,14 +173,22 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
       if (action === 'create') {
         const cron = (args.schedule ?? '').trim()
         const prompt = (args.prompt ?? '').trim()
+        const kind = args.kind === 'command' ? 'command' : 'agent'
+        const command = (args.command ?? '').trim()
         if (cron === '') return { kind: 'create', error: 'schedule is required for create' }
         if (!isValidCron(cron)) return { kind: 'create', error: `invalid cron expression: ${cron}` }
-        if (prompt === '') return { kind: 'create', error: 'prompt is required for create (must be self-contained)' }
-        const title = (args.name ?? '').trim() !== '' ? (args.name ?? '').trim() : prompt.slice(0, 40)
+        if (kind === 'command') {
+          if (command === '') return { kind: 'create', error: "command is required for create with kind='command'" }
+        } else if (prompt === '') {
+          return { kind: 'create', error: 'prompt is required for create (must be self-contained)' }
+        }
+        const fallbackTitle = kind === 'command' ? `${command} ${(args.args ?? '').trim()}`.trim().slice(0, 40) : prompt.slice(0, 40)
+        const title = (args.name ?? '').trim() !== '' ? (args.name ?? '').trim() : fallbackTitle
         const job = createJob({
           title,
           description: '',
           prompt,
+          ...(kind === 'command' ? { kind: 'command' as const, command, args: (args.args ?? '').trim() } : {}),
           target: { workdir: (args.workdir ?? '').trim(), sessionId: (args.session ?? '').trim() },
         }, now(), randomUUID())
         const timeoutMs = normalizeTimeoutMs((args.timeout_minutes ?? 0) * 60_000)
@@ -211,6 +246,28 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
           if (args.prompt !== undefined && args.prompt.trim() !== '') next = { ...next, prompt: args.prompt.trim() }
           if (args.workdir !== undefined) next = { ...next, target: { ...next.target, workdir: args.workdir.trim() } }
           if (args.session !== undefined) next = { ...next, target: { ...next.target, sessionId: args.session.trim() } }
+          // Kind switch (agent ↔ command): rebase the execution fields so the
+          // row stays coherent with its new kind.
+          if (args.kind !== undefined) {
+            const kind = args.kind.trim().toLowerCase()
+            if (kind !== 'agent' && kind !== 'command') return undefined
+            if (kind === 'command') {
+              const command = (args.command ?? next.command ?? '').trim()
+              if (command === '') return undefined
+              next = { ...next, kind: 'command', command, args: (args.args ?? next.args ?? '').trim() }
+            } else {
+              next = { ...next }
+              delete next.kind
+              delete next.command
+              delete next.args
+            }
+          } else if (args.command !== undefined || args.args !== undefined) {
+            // Editing a command job's exec line requires the command kind.
+            if (jobKind(next) !== 'command') return undefined
+            const command = args.command !== undefined ? args.command.trim() : (next.command ?? '')
+            if (command === '') return undefined
+            next = { ...next, kind: 'command', command, args: args.args !== undefined ? args.args.trim() : (next.args ?? '') }
+          }
           if (args.timeout_minutes !== undefined) {
             const timeoutMs = normalizeTimeoutMs(args.timeout_minutes * 60_000)
             if (timeoutMs === undefined) delete next.timeoutMs

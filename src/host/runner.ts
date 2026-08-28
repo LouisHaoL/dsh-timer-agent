@@ -13,6 +13,7 @@
  *   execution success/failed).
  */
 import { randomUUID } from 'node:crypto'
+import { spawn } from 'node:child_process'
 import type {
   HostAgent, HostAgentHandle, HostAgentRegistry, HostPluginContext,
   HostSession, HostSessionEvent, HostUserMessage, HostWorkspaceRegistry,
@@ -20,8 +21,9 @@ import type {
 import { isTurnEndEvent, turnErrorDetail } from './contracts.ts'
 import type { HostJobStore } from './store.ts'
 import { nextRunAtMs } from '../core/schedule.ts'
+import { appendCapped, splitCommandArgs, truncateOutputTail } from '../core/command.ts'
 import {
-  settleExecution, startExecution, withSchedule,
+  settleExecution, startExecution, withSchedule, jobKind,
   type ExecutionRecord, type JobRecord,
 } from '../core/jobs.ts'
 
@@ -77,6 +79,17 @@ interface InFlight {
   timeoutAt: number | undefined
 }
 
+/** One in-flight COMMAND execution (no session; kill() cancels the process). */
+interface CommandFlight {
+  jobId: string
+  /** Configured limit (ms) when the job carries a timeout; absent = unlimited. */
+  timeoutMs: number | undefined
+  /** Deadline (ms epoch) when the job carries a timeoutMs; absent = unlimited. */
+  timeoutAt: number | undefined
+  /** Best-effort process cancellation (spawn failure tolerated). */
+  kill(): void
+}
+
 /**
  * The scheduled-jobs engine. One instance per host plugin apply(); owns the
  * ticker interval, the in-flight map, and the session-event subscription.
@@ -86,6 +99,7 @@ export class TimerRunner {
   private readonly store: HostJobStore
   private readonly now: () => number
   private readonly inFlight = new Map<string, InFlight>() // by messageId
+  private readonly commandFlights = new Map<string, CommandFlight>() // by executionId
   private timer: ReturnType<typeof setInterval> | undefined
   private requestTimer: ReturnType<typeof setInterval> | undefined
   private disposed = false
@@ -146,11 +160,26 @@ export class TimerRunner {
       const seconds = flight.timeoutMs === undefined ? 0 : Math.max(1, Math.round(flight.timeoutMs / 1000))
       void this.settle(flight.jobId, flight.executionId, 'failed', `run timed out after ${seconds}s (deadline reached)`)
     }
+    for (const [executionId, flight] of [...this.commandFlights.entries()]) {
+      if (flight.timeoutAt === undefined || this.now() < flight.timeoutAt) continue
+      this.commandFlights.delete(executionId)
+      try {
+        flight.kill()
+      } catch (error) {
+        console.warn('[dsh-timer-agent] command timeout kill failed:', error)
+      }
+      const seconds = flight.timeoutMs === undefined ? 0 : Math.max(1, Math.round(flight.timeoutMs / 1000))
+      void this.settle(flight.jobId, executionId, 'failed', `command timed out after ${seconds}s (killed)`)
+    }
   }
 
   async dispose(): Promise<void> {
     this.disposed = true
     this.stop()
+    for (const flight of this.commandFlights.values()) {
+      try { flight.kill() } catch { /* best effort */ }
+    }
+    this.commandFlights.clear()
     for (const handle of this.pinnedHandles.values()) {
       await handle.dispose().catch(() => undefined)
     }
@@ -213,9 +242,12 @@ export class TimerRunner {
     const outcome = await this.store.mutate(current => {
       const job = current.find(candidate => candidate.id === jobId)
       if (job === undefined || job.status === 'running' || job.status === 'archived') return undefined
-      const targeting = job.target.sessionId !== '' ? 'specified-session' : 'new-session'
+      const kind = jobKind(job)
+      const targeting: ExecutionRecord['targeting'] = kind === 'command'
+        ? 'command'
+        : job.target.sessionId !== '' ? 'specified-session' : 'new-session'
       const { job: next, execution } = startExecution(job, this.now(), randomUUID(), targeting)
-      if (extraPrompt !== undefined && extraPrompt.trim() !== '') {
+      if (kind === 'agent' && extraPrompt !== undefined && extraPrompt.trim() !== '') {
         execution.error = undefined
         next.prompt = `${next.prompt}\n\n## Run Context\n${extraPrompt}`.trim()
       }
@@ -229,8 +261,12 @@ export class TimerRunner {
     return true
   }
 
-  /** The real execution: connect/create the agent, send the prompt. */
+  /** The real execution: command jobs spawn directly; agent jobs connect/create the agent and send the prompt. */
   private async execute(job: JobRecord, execution: ExecutionRecord): Promise<void> {
+    if (jobKind(job) === 'command') {
+      this.executeCommand(job, execution)
+      return
+    }
     try {
       const handle = await this.connectAgent(job)
       const agent: HostAgent = handle.agent
@@ -256,6 +292,73 @@ export class TimerRunner {
       agent.followup(message)
     } catch (error) {
       await this.settle(job.id, execution.id, 'failed', error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /**
+   * Command execution (普通任务): spawn the job's command + args directly —
+   * no AI, no session, no API quota. Exit 0 settles succeeded; anything else
+   * (nonzero exit, spawn failure, timeout kill) settles failed with the
+   * captured stdout/stderr tail attached to the execution record.
+   */
+  private executeCommand(job: JobRecord, execution: ExecutionRecord): void {
+    const command = (job.command ?? '').trim()
+    if (command === '') {
+      void this.settle(job.id, execution.id, 'failed', 'command is empty (edit the job and set a command)')
+      return
+    }
+    let argv: string[]
+    try {
+      argv = [command, ...splitCommandArgs(job.args ?? '')]
+    } catch (error) {
+      void this.settle(job.id, execution.id, 'failed', error instanceof Error ? error.message : String(error))
+      return
+    }
+    let stdout = ''
+    let stderr = ''
+    let child: { kill(): void } | undefined
+    try {
+      const spawned = spawn(argv[0], argv.slice(1), {
+        cwd: job.target.workdir.trim() !== '' ? job.target.workdir.trim() : undefined,
+        env: process.env,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      child = spawned
+      spawned.stdout?.on('data', (chunk: Uint8Array) => { stdout = appendCapped(stdout, Buffer.from(chunk).toString('utf8')) })
+      spawned.stderr?.on('data', (chunk: Uint8Array) => { stderr = appendCapped(stderr, Buffer.from(chunk).toString('utf8')) })
+      const timeoutMs = job.timeoutMs !== undefined && job.timeoutMs > 0 ? job.timeoutMs : undefined
+      this.commandFlights.set(execution.id, {
+        jobId: job.id,
+        timeoutMs,
+        timeoutAt: timeoutMs !== undefined ? this.now() + timeoutMs : undefined,
+        kill: () => { try { spawned.kill() } catch { /* best effort */ } },
+      })
+      spawned.on('error', error => {
+        this.commandFlights.delete(execution.id)
+        void this.settle(job.id, execution.id, 'failed',
+          `failed to start command '${command}': ${error instanceof Error ? error.message : String(error)}`)
+      })
+      spawned.on('close', (code, signal) => {
+        this.commandFlights.delete(execution.id)
+        const output = truncateOutputTail(stdout === '' && stderr === '' ? '' : `${stdout}${stderr === '' ? '' : `\n[stderr]\n${stderr}`}`)
+        // A kill from the timeout path already settled this execution
+        // (settle is idempotent); a spontaneous close settles here.
+        if (signal !== null && signal !== undefined) {
+          void this.settle(job.id, execution.id, 'failed', `command killed by signal ${signal}`, { output })
+          return
+        }
+        if (code === 0) {
+          void this.settle(job.id, execution.id, 'succeeded', undefined, { exitCode: 0, output })
+          return
+        }
+        void this.settle(job.id, execution.id, 'failed',
+          code === null ? 'command exited without an exit code' : `command exited with code ${code}`,
+          { exitCode: code ?? undefined, output })
+      })
+    } catch (error) {
+      if (child !== undefined) this.commandFlights.delete(execution.id)
+      void this.settle(job.id, execution.id, 'failed', error instanceof Error ? error.message : String(error))
     }
   }
 
@@ -418,13 +521,13 @@ export class TimerRunner {
   }
 
   /** Persist a settled (or failed-to-start) execution and job status. */
-  private async settle(jobId: string, executionId: string, outcome: 'succeeded' | 'failed' | 'cancelled', error?: string): Promise<void> {
+  private async settle(jobId: string, executionId: string, outcome: 'succeeded' | 'failed' | 'cancelled', error?: string, extra?: { exitCode?: number, output?: string }): Promise<void> {
     await this.store.mutate(current => {
       const job = current.find(candidate => candidate.id === jobId)
       if (job === undefined) return undefined
       return {
         jobs: current.map(candidate =>
-          candidate.id === jobId ? settleExecution(candidate, executionId, outcome, this.now(), error) : candidate),
+          candidate.id === jobId ? settleExecution(candidate, executionId, outcome, this.now(), error, extra) : candidate),
         result: true,
       }
     })

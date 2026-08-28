@@ -88,6 +88,71 @@ check('empty-tab copy exists in both dictionaries',
   typeof zh['board.emptyTab'] === 'string' && typeof en['board.emptyTab'] === 'string')
 
 // ============================================================================
+// 2b. locale completeness for the job-kind surface (普通任务)
+// ============================================================================
+section('locales: job-kind keys resolve in zh + en')
+{
+  const kindKeys = [
+    'new.kind', 'new.kind.agent', 'new.kind.command', 'new.kind.agentHint', 'new.kind.commandHint',
+    'new.command', 'new.commandPlaceholder', 'new.args', 'new.argsPlaceholder',
+    'new.workdir', 'new.workdirPlaceholder', 'new.commandRequired',
+    'detail.command', 'detail.kind.agent', 'detail.kind.command',
+    'detail.execution.command', 'detail.execution.exitCode', 'detail.output',
+    'card.kind.command',
+  ] as const
+  check('every kind key exists in zh', kindKeys.every(key => typeof zh[key] === 'string'))
+  check('every kind key exists in en', kindKeys.every(key => typeof en[key] === 'string'))
+  check('kind labels render', t('new.kind.agent') === 'AI Agent 任务' && t('new.kind.command') === '普通任务（命令）')
+  check('command-required error renders', t('new.commandRequired') === '普通任务必须填写命令')
+}
+
+// ============================================================================
+// 2c. command-job createJob shape + controller POST body
+// ============================================================================
+section('command jobs: model shape + controller POST body')
+{
+  const cmd = createJob({
+    title: 'c', description: '', prompt: '',
+    kind: 'command', command: 'python', args: '-X utf8 s.py',
+    target: { workdir: 'D:/w', sessionId: '' },
+  }, 1_000, 'id-cmd')
+  check('createJob command shape', cmd.kind === 'command' && cmd.command === 'python' && cmd.args === '-X utf8 s.py')
+
+  // The controller's createJob must carry kind/command/args to the host route.
+  const posts: Array<Record<string, unknown>> = []
+  const original = globalThis.fetch
+  globalThis.fetch = (((url: string | URL, init?: { method?: string, body?: string }) => {
+    const href = String(url)
+    const method = init?.method ?? 'GET'
+    if (method === 'POST' && href === '/api/dsh-timer-agent/jobs' && init?.body !== undefined) {
+      posts.push(JSON.parse(init.body) as Record<string, unknown>)
+    }
+    const text = JSON.stringify(init?.method === 'GET' && href === '/api/dsh-timer-agent/jobs' ? { jobs: [] } : { job: {} })
+    return Promise.resolve({ status: 200, headers: new Map(), ok: true, json: async () => JSON.parse(text) } as unknown as Response)
+  })) as typeof fetch
+  try {
+    const sessions = {
+      list: { getSnapshot: () => ({ current: undefined }), subscribe: () => () => {} },
+      open: () => {},
+    }
+    const controller = new RemoteBoardController(sessions as unknown as never)
+    void controller.createJob({
+      title: 't', description: '', prompt: '',
+      kind: 'command', command: 'pwsh', args: '-v',
+      target: { workdir: '', sessionId: '' },
+    })
+    await new Promise(resolve => setTimeout(resolve, 15))
+    const body = posts[0]
+    check('controller POST body carries command fields', body?.kind === 'command'
+      && body?.command === 'pwsh' && body?.args === '-v', JSON.stringify(body))
+    controller.dispose()
+  } finally {
+    globalThis.fetch = original
+  }
+}
+
+
+// ============================================================================
 // 3. RemoteBoardController: mirror + the view-session jump fix
 // ============================================================================
 section('remote controller: mirror + openSession jump fix')

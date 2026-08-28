@@ -16,6 +16,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { isValidCron, nextRunAtMs } from '../src/core/schedule.ts'
+import { splitCommandArgs, truncateOutputTail } from '../src/core/command.ts'
 import { HostJobStore } from '../src/host/store.ts'
 import { TimerRunner } from '../src/host/runner.ts'
 import { registerTimerTool } from '../src/host/tools.ts'
@@ -24,7 +25,7 @@ import type {
   HostAgent, HostAgentHandle, HostPluginContext, HostRoute,
   NodeIncomingMessage, NodeServerResponse,
 } from '../src/host/contracts.ts'
-import { createJob, normalizeTimeoutMs, timeoutLabel, withSchedule, type JobRecord } from '../src/core/jobs.ts'
+import { commandLine, createJob, jobKind, normalizeTimeoutMs, timeoutLabel, withSchedule, type JobRecord } from '../src/core/jobs.ts'
 
 let passed = 0
 let failed = 0
@@ -548,6 +549,245 @@ section('HTTP routes: handlers + loopback fence')
     modelSelection: { provider: '', model: 'm1' },
   }), badModel.res)
   check('POST /jobs rejects invalid modelSelection', badModel.status === 400)
+}
+
+// ============================================================================
+// 6. command jobs (普通任务): arg splitting, model, runner spawn, tool, routes
+// ============================================================================
+section('command: splitCommandArgs')
+check('whitespace split', JSON.stringify(splitCommandArgs('-X utf8 script.py')) === JSON.stringify(['-X', 'utf8', 'script.py']))
+check('double quotes group (with spaces inside)', JSON.stringify(splitCommandArgs('-Command "echo hello world"')) === JSON.stringify(['-Command', 'echo hello world']))
+check('single quotes group literally', JSON.stringify(splitCommandArgs("-Command 'echo hi'")) === JSON.stringify(['-Command', 'echo hi']))
+check('adjacent quoted + bare text merges', JSON.stringify(splitCommandArgs('ab"c d"e')) === JSON.stringify(['abc de']))
+check('escaped quote inside double quotes', JSON.stringify(splitCommandArgs('"a\\"b"')) === JSON.stringify(['a"b']))
+check('unterminated double quote throws', (() => { try { splitCommandArgs('"oops'); return false } catch { return true } })())
+check('unterminated single quote throws', (() => { try { splitCommandArgs("'oops"); return false } catch { return true } })())
+check('empty input → no args', splitCommandArgs('').length === 0 && splitCommandArgs('   ').length === 0)
+check('truncateOutputTail keeps tail with marker', truncateOutputTail('a'.repeat(20), 5) === '…（前 15 字符已省略）\n' + 'a'.repeat(5))
+check('truncateOutputTail passthrough under cap', truncateOutputTail('abc', 5) === 'abc')
+
+section('command: job model + ledger roundtrip')
+{
+  const cmd = createJob({
+    title: 'cmd', description: '', prompt: '',
+    kind: 'command', command: 'node', args: '-e "console.log(1)"',
+    target: { workdir: 'D:/work', sessionId: '' },
+  }, 1000, 'cmd-1')
+  check('createJob stores kind/command/args', jobKind(cmd) === 'command' && cmd.command === 'node' && cmd.args === '-e "console.log(1)"')
+  check('commandLine renders exec line', commandLine(cmd) === 'node -e "console.log(1)"')
+  const agentJob = createJob({ title: 'a', description: '', prompt: 'p', target: { workdir: '', sessionId: '' } }, 1000, 'ag-1')
+  check('agent job stays lean (no kind fields)', jobKind(agentJob) === 'agent' && agentJob.command === undefined && agentJob.args === undefined)
+  check('commandLine of agent job is empty', commandLine(agentJob) === '')
+
+  const file = join(tempDir, 'cmdstore.json')
+  const cs = new HostJobStore(file)
+  await cs.mutate(jobs => ({ jobs: [...jobs, cmd, agentJob], result: true }))
+  const reloaded = await cs.load()
+  check('ledger roundtrip keeps command fields', reloaded.find(j => j.id === 'cmd-1')?.command === 'node'
+    && jobKind(reloaded.find(j => j.id === 'cmd-1')!) === 'command')
+  check('ledger roundtrip keeps agent rows valid', reloaded.find(j => j.id === 'ag-1')?.prompt === 'p')
+
+  // A command execution record (targeting 'command', exitCode, output) survives parseLedger.
+  const withExec = {
+    ...cmd,
+    executions: [{
+      id: 'exec-1', sessionId: undefined, targeting: 'command' as const, startedAt: 1000,
+      endedAt: 2000, result: 'succeeded' as const, error: undefined, exitCode: 0, output: 'hello',
+    }],
+  }
+  await cs.mutate(jobs => ({ jobs: [withExec, agentJob], result: true }))
+  const execReloaded = (await cs.load()).find(j => j.id === 'cmd-1')
+  check('command execution record survives the ledger',
+    execReloaded?.executions[0]?.targeting === 'command'
+    && execReloaded?.executions[0]?.exitCode === 0
+    && execReloaded?.executions[0]?.output === 'hello')
+}
+
+section('TimerRunner: command job fires the real process (success + failure + output)')
+{
+  const host = makeFakeHost()
+  const s = new HostJobStore(join(tempDir, 'cmdrunner.json'))
+  let now = Date.UTC(2026, 0, 1)
+  const runner = new TimerRunner({ ctx: host.ctx, store: s, now: () => now })
+  runner.start()
+  runner.stop()
+
+  let job = createJob({
+    title: 'echo-job', description: '', prompt: '',
+    kind: 'command', command: 'node', args: '-e "console.log(42+1)"',
+    target: { workdir: '', sessionId: '' },
+  }, now, 'job-cmd1')
+  job = withSchedule(job, { enabled: true, cron: '0 * * * *', nextRunAt: now - 1 }, now)
+  await s.mutate(jobs => ({ jobs: [...jobs, job], result: true }))
+  const fired = await runner.tick()
+  check('command job fired', fired === 1)
+  // Real spawn: give the process a moment to run and settle.
+  for (let i = 0; i < 40 && ((await s.load())[0]?.executions[0]?.endedAt === undefined); i++) {
+    await new Promise(r => setTimeout(r, 100))
+  }
+  const done = (await s.load())[0]
+  check('command run settles succeeded with exitCode 0', done?.status === 'done'
+    && done?.executions[0]?.result === 'succeeded' && done?.executions[0]?.exitCode === 0,
+    `${done?.status}/${done?.executions[0]?.result}/${done?.executions[0]?.exitCode}`)
+  check('command run captured stdout tail', (done?.executions[0]?.output ?? '').includes('43'),
+    done?.executions[0]?.output)
+  check('command run created no agent session', !host.calls.some(c => c.kind === 'create' || c.kind === 'resume'))
+
+  // Failure: nonzero exit settles failed with the code + stderr in the output.
+  let bad = createJob({
+    title: 'fail-job', description: '', prompt: '',
+    kind: 'command', command: 'node', args: "-e \"console.error('boom'); process.exit(3)\"",
+    target: { workdir: '', sessionId: '' },
+  }, now, 'job-cmd2')
+  await s.mutate(jobs => ({ jobs: [...jobs.filter(j => j.id !== 'job-cmd2'), bad], result: true }))
+  const accepted = await runner.requestRun('job-cmd2')
+  check('manual command run accepted', accepted === true)
+  for (let i = 0; i < 40 && ((await s.load()).find(j => j.id === 'job-cmd2')?.executions[0]?.endedAt === undefined); i++) {
+    await new Promise(r => setTimeout(r, 100))
+  }
+  const failedRun = (await s.load()).find(j => j.id === 'job-cmd2')
+  check('nonzero exit settles failed with code 3', failedRun?.status === 'failed'
+    && failedRun?.executions[0]?.result === 'failed' && failedRun?.executions[0]?.exitCode === 3,
+    `${failedRun?.status}/${failedRun?.executions[0]?.result}/${failedRun?.executions[0]?.exitCode}`)
+  check('stderr captured in output tail', (failedRun?.executions[0]?.output ?? '').includes('boom'))
+}
+
+section('TimerRunner: command timeout kills the process and settles failed')
+{
+  const host = makeFakeHost()
+  const s = new HostJobStore(join(tempDir, 'cmdtimeout.json'))
+  let now = Date.UTC(2026, 0, 1, 0, 30, 0)
+  const runner = new TimerRunner({ ctx: host.ctx, store: s, now: () => now })
+  runner.start()
+  runner.stop()
+
+  let job = createJob({
+    title: 'slow-cmd', description: '', prompt: '',
+    kind: 'command', command: 'node', args: '-e "setTimeout(()=>{}, 600000)"',
+    target: { workdir: '', sessionId: '' },
+  }, now, 'job-cmd-t')
+  job = withSchedule(job, { enabled: true, cron: '0 * * * *', nextRunAt: now - 1 }, now)
+  job = { ...job, timeoutMs: 120_000 } // 2 minutes
+  await s.mutate(jobs => ({ jobs: [...jobs, job], result: true }))
+  await runner.tick()
+  await new Promise(r => setTimeout(r, 100))
+  check('slow command is running', (await s.load())[0]?.status === 'running')
+
+  now += 121_000 // past the deadline
+  await runner.tick()
+  await new Promise(r => setTimeout(r, 200))
+  const timedOut = (await s.load())[0]
+  check('command timeout settles failed with reason', timedOut?.status === 'failed'
+    && typeof timedOut?.executions[0]?.error === 'string' && timedOut.executions[0].error.includes('timed out'),
+    `${timedOut?.status}/${timedOut?.executions[0]?.error}`)
+}
+
+section('timer_agent tool: command create / update / run')
+{
+  const host = makeFakeHost()
+  const s = new HostJobStore(join(tempDir, 'cmdtool.json'))
+  let now = Date.UTC(2026, 0, 1)
+  const runner = new TimerRunner({ ctx: host.ctx, store: s, now: () => now })
+  const registered: unknown[] = []
+  registerTimerTool({ register: (def: unknown) => { registered.push(def); return () => {} } }, { store: s, runner, now: () => now })
+  const tool = registered[0] as {
+    name: string
+    execute(args: Record<string, string | number | undefined>): Promise<Record<string, unknown>>
+  }
+
+  const badCmd = await tool.execute({ action: 'create', kind: 'command', schedule: '0 9 * * *', command: '' }) as { error?: string }
+  check('command create without command rejected', typeof badCmd.error === 'string')
+  const created = await tool.execute({
+    action: 'create', kind: 'command', name: 'daily-script',
+    command: 'node', args: '-e "console.log(7)"', schedule: '0 9 * * *', timeout_minutes: 10,
+  }) as { job?: { id?: string, job_kind?: string, command?: string, args?: string } }
+  const cmdId = created.job?.id
+  check('command create returns kind/command summary',
+    typeof cmdId === 'string' && created.job?.job_kind === 'command' && created.job?.command === 'node')
+  const row = (await s.load())[0]
+  check('command create persisted exec fields + timeout', row?.command === 'node'
+    && row?.args === '-e "console.log(7)"' && row?.timeoutMs === 600_000)
+
+  // update: change args; switch kind agent→command on an agent job.
+  await tool.execute({ action: 'update', job_id: cmdId, args: '-e "console.log(8)"' })
+  check('update args', (await s.load())[0]?.args === '-e "console.log(8)"')
+
+  // run: fires the real command.
+  await tool.execute({ action: 'run', job_id: cmdId })
+  for (let i = 0; i < 40 && ((await s.load())[0]?.executions[0]?.endedAt === undefined); i++) {
+    await new Promise(r => setTimeout(r, 100))
+  }
+  const ranRow = (await s.load())[0]
+  check('tool run executed the command successfully', ranRow?.status === 'done'
+    && ranRow?.executions[0]?.targeting === 'command'
+    && (ranRow?.executions[0]?.output ?? '').includes('8'),
+    `${ranRow?.status}/${ranRow?.executions[0]?.output}`)
+}
+
+section('HTTP routes: command job create / patch / validate')
+{
+  const host = makeFakeHost()
+  const s = new HostJobStore(join(tempDir, 'cmdroutes.json'))
+  let now = Date.UTC(2026, 0, 1)
+  const runner = new TimerRunner({ ctx: host.ctx, store: s, now: () => now })
+  const routes = makeRoutes({ store: s, runner, ctx: host.ctx, now: () => now })
+  const jobsRoute = routes.find(r => r.path.endsWith('/jobs'))!
+
+  const { Readable, Writable } = await import('node:stream')
+  function makeReq(method: string, url: string, body?: unknown): NodeIncomingMessage {
+    const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]) as unknown as NodeIncomingMessage
+    Object.assign(req, { method, url, headers: { host: '127.0.0.1:3080' }, socket: { remoteAddress: '127.0.0.1' } })
+    return req
+  }
+  function makeRes(): { res: NodeServerResponse; status: number; body: string } {
+    const state = { status: 0, body: '' }
+    const res = new Writable({ write(chunk, _enc, cb) { state.body += chunk.toString(); cb() } }) as unknown as NodeServerResponse
+    Object.assign(res, { writeHead: (status: number) => { state.status = status }, end: (chunk?: string | Buffer) => { if (chunk !== undefined) state.body += chunk.toString() } })
+    return { res, get status() { return state.status }, get body() { return state.body } }
+  }
+
+  // POST a command job
+  const created = makeRes()
+  await jobsRoute.handler(makeReq('POST', '/api/dsh-timer-agent/jobs', {
+    title: 'r-cmd', kind: 'command', command: 'python', args: '-X utf8 temu_yh_yinhua.py',
+    target: { workdir: 'D:/workspace/dsh/ziniao', sessionId: '' }, cron: '30 9 * * *',
+  }), created.res)
+  const createdJob = JSON.parse(created.body).job as JobRecord
+  check('POST /jobs command → 201 with fields', created.status === 201
+    && createdJob.kind === 'command' && createdJob.command === 'python' && createdJob.args === '-X utf8 temu_yh_yinhua.py')
+  check('POST /jobs command arms the schedule', createdJob.schedule?.enabled === true && createdJob.schedule?.cron === '30 9 * * *')
+
+  // POST a command job without a command → 400
+  const bad = makeRes()
+  await jobsRoute.handler(makeReq('POST', '/api/dsh-timer-agent/jobs', { title: 'x', kind: 'command', command: '' }), bad.res)
+  check('POST command job without command → 400', bad.status === 400, `${bad.status}`)
+
+  // PATCH the command line + workdir
+  const patched = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${createdJob.id}`, {
+    command: 'pwsh', args: '-NoProfile -Command "echo hi"', target: { workdir: 'D:/other', sessionId: '' },
+  }), patched.res)
+  const patchedJob = JSON.parse(patched.body).job as JobRecord
+  check('PATCH command/args/workdir', patched.status === 200
+    && patchedJob.command === 'pwsh' && patchedJob.args === '-NoProfile -Command "echo hi"'
+    && patchedJob.target.workdir === 'D:/other')
+
+  // PATCH kind switch: agent → command requires a command
+  const agentCreated = makeRes()
+  await jobsRoute.handler(makeReq('POST', '/api/dsh-timer-agent/jobs', { title: 'to-convert', prompt: 'p' }), agentCreated.res)
+  const agentId = (JSON.parse(agentCreated.body).job as JobRecord).id
+  const converted = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${agentId}`, {
+    kind: 'command', command: 'node', args: '-v',
+  }), converted.res)
+  const convertedJob = JSON.parse(converted.body).job as JobRecord
+  check('PATCH kind agent→command converts', converted.status === 200
+    && convertedJob.kind === 'command' && convertedJob.command === 'node')
+  const reverted = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${agentId}`, { kind: 'agent' }), reverted.res)
+  const revertedJob = JSON.parse(reverted.body).job as JobRecord
+  check('PATCH kind command→agent clears exec fields', reverted.status === 200
+    && revertedJob.kind === undefined && revertedJob.command === undefined && revertedJob.args === undefined)
 }
 
 // ============================================================================

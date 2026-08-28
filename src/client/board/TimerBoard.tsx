@@ -8,7 +8,7 @@
  */
 import { useEffect, useState } from 'react'
 import { selectedJobOf, type ControllerSnapshot } from '../../core/controller.ts'
-import type { JobRecord, JobStatus } from '../../core/jobs.ts'
+import { jobKind, type JobRecord, type JobStatus } from '../../core/jobs.ts'
 import type { TargetGroup, ModelOptions } from '../target-options.ts'
 import type { BoardControllerFace } from '../controller-face.ts'
 import { t, type TimerAgentKey } from '../locales.ts'
@@ -38,13 +38,15 @@ export const STATUS_LABEL_KEY: Record<JobStatus, TimerAgentKey> = {
 /** Tab → label key ('all' + one per status), re-exported from tabs.ts. */
 export { TAB_LABEL_KEY }
 
-/** Case-insensitive title/description/prompt match. */
+/** Case-insensitive title/description/prompt/command match. */
 function matchesFilter(job: JobRecord, filter: string): boolean {
   if (filter.trim() === '') return true
   const needle = filter.trim().toLowerCase()
   return job.title.toLowerCase().includes(needle)
     || job.description.toLowerCase().includes(needle)
     || job.prompt.toLowerCase().includes(needle)
+    || (job.command ?? '').toLowerCase().includes(needle)
+    || (job.args ?? '').toLowerCase().includes(needle)
 }
 
 /** Board component; subscribes to the controller snapshot. */
@@ -125,6 +127,9 @@ export function TimerBoard({ controller, targetOptions, modelOptions }: { contro
                 <span className={css.statusDot} aria-hidden="true" />
                 {t(STATUS_LABEL_KEY[job.status])}
               </span>
+              {jobKind(job) === 'command' && (
+                <span className={css.kindBadge} data-kind="command" title={(job.command ?? '')}>⌘ {t('card.kind.command')}</span>
+              )}
               {job.status === 'running' && <span className={css.cardSpinner} aria-hidden="true" />}
             </span>
             <span className={css.cardTitle}>{job.title}</span>

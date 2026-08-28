@@ -131,6 +131,10 @@ export function NewJobModal({ controller, targetOptions, modelOptions, onClose }
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [prompt, setPrompt] = useState('')
+  const [kind, setKind] = useState<'agent' | 'command'>('agent')
+  const [command, setCommand] = useState('')
+  const [args, setArgs] = useState('')
+  const [commandWorkdir, setCommandWorkdir] = useState('')
   const [groups, setGroups] = useState<TargetGroup[]>(DEFAULT_TARGET_GROUPS)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set<string>())
   const [selectedKey, setSelectedKey] = useState('default:new')
@@ -181,8 +185,31 @@ export function NewJobModal({ controller, targetOptions, modelOptions, onClose }
   }
 
   const submit = (): void => {
+    if (kind === 'command' && command.trim() === '') {
+      setError(t('new.commandRequired'))
+      return
+    }
     // Stage the cron so createJob arms the schedule server-side in one call.
     controller.stageCreateCron?.(cronEnabled && isValidCron(cron) ? cron : undefined)
+    if (kind === 'command') {
+      const created = controller.createJob({
+        title,
+        description,
+        prompt: '',
+        kind: 'command',
+        command,
+        args,
+        target: { workdir: commandWorkdir.trim(), sessionId: '' },
+      })
+      void Promise.resolve(created).then(job => {
+        if (job === undefined) {
+          setError(t('new.required'))
+          return
+        }
+        onClose()
+      })
+      return
+    }
     const model = modelLeaves.find(leaf => leaf.key === modelKey)
     const created = controller.createJob({
       title,
@@ -210,6 +237,34 @@ export function NewJobModal({ controller, targetOptions, modelOptions, onClose }
       >
         <h2 className={css.modalTitle}>{t('board.new')}</h2>
 
+        <div className={css.field}>
+          <span className={css.fieldLabel}>{t('new.kind')}</span>
+          <div className={css.kindToggle} role="radiogroup" aria-label={t('new.kind')}>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={kind === 'agent'}
+              className={`${css.kindOption} ${kind === 'agent' ? css.kindOptionActive : ''}`}
+              data-kind="agent"
+              onClick={() => { setKind('agent'); setError(undefined) }}
+            >
+              {t('new.kind.agent')}
+              <span className={css.kindOptionHint}>{t('new.kind.agentHint')}</span>
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={kind === 'command'}
+              className={`${css.kindOption} ${kind === 'command' ? css.kindOptionActive : ''}`}
+              data-kind="command"
+              onClick={() => { setKind('command'); setError(undefined) }}
+            >
+              {t('new.kind.command')}
+              <span className={css.kindOptionHint}>{t('new.kind.commandHint')}</span>
+            </button>
+          </div>
+        </div>
+
         <label className={css.field}>
           <span className={css.fieldLabel}>{t('new.title')}</span>
           <input
@@ -232,43 +287,83 @@ export function NewJobModal({ controller, targetOptions, modelOptions, onClose }
           />
         </label>
 
-        <label className={css.field}>
-          <span className={css.fieldLabel}>{t('new.prompt')}</span>
-          <textarea
-            className={css.input}
-            rows={3}
-            value={prompt}
-            placeholder={t('new.promptPlaceholder')}
-            onChange={event => { setPrompt(event.target.value) }}
-          />
-        </label>
+        {kind === 'command' ? (
+          <>
+            <label className={css.field}>
+              <span className={css.fieldLabel}>{t('new.command')}</span>
+              <input
+                className={css.input}
+                value={command}
+                placeholder={t('new.commandPlaceholder')}
+                aria-label={t('new.command')}
+                spellCheck={false}
+                onChange={event => { setCommand(event.target.value); setError(undefined) }}
+              />
+            </label>
+            <label className={css.field}>
+              <span className={css.fieldLabel}>{t('new.args')}</span>
+              <input
+                className={css.input}
+                value={args}
+                placeholder={t('new.argsPlaceholder')}
+                aria-label={t('new.args')}
+                spellCheck={false}
+                onChange={event => { setArgs(event.target.value) }}
+              />
+            </label>
+            <label className={css.field}>
+              <span className={css.fieldLabel}>{t('new.workdir')}</span>
+              <input
+                className={css.input}
+                value={commandWorkdir}
+                placeholder={t('new.workdirPlaceholder')}
+                aria-label={t('new.workdir')}
+                spellCheck={false}
+                onChange={event => { setCommandWorkdir(event.target.value) }}
+              />
+            </label>
+          </>
+        ) : (
+          <>
+            <label className={css.field}>
+              <span className={css.fieldLabel}>{t('new.prompt')}</span>
+              <textarea
+                className={css.input}
+                rows={3}
+                value={prompt}
+                placeholder={t('new.promptPlaceholder')}
+                onChange={event => { setPrompt(event.target.value) }}
+              />
+            </label>
 
-        <div className={css.field}>
-          <span className={css.fieldLabel}>{t('new.target')}</span>
-          <TargetTree
-            groups={groups}
-            expanded={expanded}
-            selectedKey={selectedKey}
-            onToggle={toggleGroup}
-            onSelect={setSelectedKey}
-          />
-          <span className={css.fieldHint}>{t('new.target.hint')}</span>
-        </div>
+            <div className={css.field}>
+              <span className={css.fieldLabel}>{t('new.target')}</span>
+              <TargetTree
+                groups={groups}
+                expanded={expanded}
+                selectedKey={selectedKey}
+                onToggle={toggleGroup}
+                onSelect={setSelectedKey}
+              />
+              <span className={css.fieldHint}>{t('new.target.hint')}</span>
+            </div>
 
-        <label className={css.field}>
-          <span className={css.fieldLabel}>{t('new.model')}</span>
-          <select
-            className={css.input}
-            value={modelKey}
-            aria-label={t('new.model')}
-            onChange={event => { setModelKey(event.target.value) }}
-          >
-            <option value="">{modelDefaultLabel}</option>
-            {modelLeaves.map(leaf => (
-              <option key={leaf.key} value={leaf.key}>{leaf.label}</option>
-            ))}
-          </select>
-        </label>
+            <label className={css.field}>
+              <span className={css.fieldLabel}>{t('new.model')}</span>
+              <select
+                className={css.input}
+                value={modelKey}
+                aria-label={t('new.model')}
+                onChange={event => { setModelKey(event.target.value) }}
+              >
+                <option value="">{modelDefaultLabel}</option>
+                {modelLeaves.map(leaf => (
+                  <option key={leaf.key} value={leaf.key}>{leaf.label}</option>
+                ))}
+              </select>
+            </label>
+          </>
+        )}
 
         <div className={css.field}>
           <label className={css.scheduleToggle}>

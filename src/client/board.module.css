@@ -337,6 +337,61 @@ html[data-dsh-timeragent-active]:not([data-dsh-ssh-active]):not([data-dsh-taskbo
   opacity: 0.75;
 }
 
+/* Kind chip: marks 普通任务 (command) jobs on cards and the detail header. */
+.kindBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid rgba(156, 106, 222, 0.5);
+  color: #9c6ade;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kindBadge[data-kind='agent'] {
+  border-color: var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* Kind selector (new-job modal): two radio-styled option cards. */
+.kindToggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.kindOption {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.kindOption:hover { border-color: var(--dsw-alias-border-l1); }
+
+.kindOptionActive {
+  border-color: #4c8bf5;
+  color: #4c8bf5;
+}
+
+.kindOptionHint {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+  font-weight: normal;
+}
+
 .jobCard[data-status='archived'] .cardTitle {
   color: var(--dsw-alias-label-tertiary);
 }
@@ -744,6 +799,34 @@ select.input { cursor: pointer; }
   font-size: 11px;
   color: #d4574e;
   word-break: break-all;
+}
+
+/* Command-run output: collapsible tail of the captured stdout/stderr. */
+.executionOutput {
+  flex-basis: 100%;
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.executionOutput summary {
+  cursor: pointer;
+  color: var(--dsw-alias-label-tertiary);
+  user-select: none;
+}
+
+.outputBlock {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-l2, rgba(128, 128, 128, 0.08));
+  border: 1px solid var(--dsw-alias-border-l2);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 220px;
+  overflow: auto;
+  color: var(--dsw-alias-label-secondary);
 }
 
 /* --- misc ---------------------------------------------------------------- */

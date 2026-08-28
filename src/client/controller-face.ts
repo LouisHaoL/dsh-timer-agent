@@ -17,7 +17,7 @@ export interface BoardControllerFace {
   openJob(id: string): void
   closeJob(): void
   createJob(input: NewJobInput): Promise<JobRecord | undefined> | JobRecord | undefined
-  updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt'>> & { target?: SessionTarget; cron?: string; scheduleEnabled?: boolean; timeoutMinutes?: number; modelSelection?: JobModelSelection | null }): Promise<void> | void
+  updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt' | 'command' | 'args'>> & { target?: SessionTarget; cron?: string; scheduleEnabled?: boolean; timeoutMinutes?: number; modelSelection?: JobModelSelection | null }): Promise<void> | void
   deleteJob(id: string): Promise<void> | void
   resetJob(id: string): Promise<void> | void
   /** Freeze a job: no schedule fires, no manual runs (host refuses while running). */

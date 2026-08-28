@@ -32,6 +32,9 @@ function isJobRecordShape(value: unknown): value is Omit<JobRecord, 'status'> & 
   if (typeof record.title !== 'string') return false
   if (typeof record.description !== 'string') return false
   if (typeof record.prompt !== 'string') return false
+  if (record.kind !== undefined && record.kind !== 'agent' && record.kind !== 'command') return false
+  if (record.command !== undefined && typeof record.command !== 'string') return false
+  if (record.args !== undefined && typeof record.args !== 'string') return false
   if (typeof record.createdAt !== 'number') return false
   if (typeof record.updatedAt !== 'number') return false
   const target = record.target
@@ -50,11 +53,13 @@ function isExecutionShape(value: unknown): value is ExecutionRecord {
   const entry = value as Record<string, unknown>
   if (typeof entry.id !== 'string') return false
   if (entry.sessionId !== undefined && typeof entry.sessionId !== 'string') return false
-  if (entry.targeting !== 'specified-session' && entry.targeting !== 'new-session') return false
+  if (entry.targeting !== 'specified-session' && entry.targeting !== 'new-session' && entry.targeting !== 'command') return false
   if (typeof entry.startedAt !== 'number') return false
   if (entry.endedAt !== undefined && typeof entry.endedAt !== 'number') return false
   if (entry.result !== undefined && entry.result !== 'succeeded' && entry.result !== 'failed' && entry.result !== 'cancelled') return false
   if (entry.error !== undefined && typeof entry.error !== 'string') return false
+  if (entry.exitCode !== undefined && typeof entry.exitCode !== 'number') return false
+  if (entry.output !== undefined && typeof entry.output !== 'string') return false
   return true
 }
 
@@ -101,6 +106,13 @@ export function parseLedger(raw: string | null): JobRecord[] {
       continue
     }
     const job: JobRecord = { ...row, status: normalizeStatus(row.status) }
+    // Command rows keep their kind + exec fields; agent rows stay lean
+    // (an absent kind IS the agent default, matching pre-0.2 ledgers).
+    if (row.kind !== 'command') {
+      delete job.kind
+      delete job.command
+      delete job.args
+    }
     job.target = normalizeTarget(row.target)
     job.schedule = normalizeSchedule(row.schedule)
     jobs.push(job)

@@ -19,17 +19,29 @@
 export type JobStatus = 'idle' | 'running' | 'done' | 'failed' | 'archived'
 
 /**
+ * How a job executes. 'agent' (the default) drives a real dsh agent session
+ * with the job's prompt; 'command' spawns the job's command + args directly
+ * (no AI, no API quota) — for scripts that simply need a timer.
+ */
+export type JobKind = 'agent' | 'command'
+
+/** Resolve a job's kind; absent/unknown fields degrade to the 'agent' default. */
+export function jobKind(job: Pick<JobRecord, 'kind'>): JobKind {
+  return job.kind === 'command' ? 'command' : 'agent'
+}
+
+/**
  * One real execution attempt: the run's own id, the dsh session that ran it
- * (filled once the session is created/connected), and the settled outcome
- * once the session's turn ended.
+ * (filled once the session is created/connected; undefined for command
+ * runs), and the settled outcome once the execution ended.
  */
 export interface ExecutionRecord {
   /** Execution attempt id (uuid). */
   id: string
   /** The dsh session that ran this attempt; absent until creation resolves. */
   sessionId: string | undefined
-  /** How the session was targeted for this attempt. */
-  targeting: 'specified-session' | 'new-session'
+  /** How the session was targeted for this attempt ('command' = direct spawn). */
+  targeting: 'specified-session' | 'new-session' | 'command'
   /** When the run started (ms epoch). */
   startedAt: number
   /** When the run settled; absent while still running. */
@@ -38,6 +50,10 @@ export interface ExecutionRecord {
   result: 'succeeded' | 'failed' | 'cancelled' | undefined
   /** Human failure text when the run failed. */
   error: string | undefined
+  /** Command runs: the process's exit code (null-ish when killed). */
+  exitCode?: number
+  /** Command runs: captured stdout+stderr tail for the detail view. */
+  output?: string
 }
 
 /**
@@ -96,8 +112,17 @@ export interface JobRecord {
   title: string
   /** Longer human description shown in the detail view. */
   description: string
-  /** The prompt sent to the dsh agent when this job fires. */
+  /** The prompt sent to the dsh agent when this job fires (agent jobs). */
   prompt: string
+  /**
+   * Execution kind: 'agent' (default; prompt through a dsh session) or
+   * 'command' (spawn {@link command} + {@link args} directly, no AI).
+   */
+  kind?: JobKind
+  /** Command jobs: the executable to spawn (name or absolute path). */
+  command?: string
+  /** Command jobs: argument string for {@link command} (quote-aware split). */
+  args?: string
   /** Current lifecycle status. */
   status: JobStatus
   /** Session targeting (see {@link SessionTarget}). */
@@ -149,6 +174,12 @@ export interface NewJobInput {
   title: string
   description: string
   prompt: string
+  /** Execution kind; absent → 'agent'. */
+  kind?: JobKind
+  /** Command jobs: executable to spawn. */
+  command?: string
+  /** Command jobs: argument string (quote-aware split). */
+  args?: string
   target: SessionTarget
   /** Model override for runs (absent → default resolution). */
   modelSelection?: JobModelSelection
@@ -167,11 +198,17 @@ export function isJobStatus(value: unknown): value is JobStatus {
 
 /** Create a job from user input. */
 export function createJob(input: NewJobInput, now: number, id: string): JobRecord {
+  const kind = jobKind(input)
   return {
     id,
     title: input.title.trim(),
     description: input.description.trim(),
     prompt: input.prompt.trim(),
+    ...(kind === 'command' ? {
+      kind,
+      command: (input.command ?? '').trim(),
+      args: (input.args ?? '').trim(),
+    } : {}),
     status: 'idle',
     target: { ...input.target },
     ...input.modelSelection === undefined ? {} : { modelSelection: { ...input.modelSelection } },
@@ -179,6 +216,12 @@ export function createJob(input: NewJobInput, now: number, id: string): JobRecor
     updatedAt: now,
     executions: [],
   }
+}
+
+/** A command job's display/exec line: `command args` (agent jobs → ''). */
+export function commandLine(job: Pick<JobRecord, 'kind' | 'command' | 'args'>): string {
+  if (jobKind(job) !== 'command') return ''
+  return `${job.command ?? ''} ${job.args ?? ''}`.trim()
 }
 
 /** Clone a job with an updated status and a fresh updatedAt. */
@@ -256,12 +299,20 @@ export function settleExecution(
   outcome: 'succeeded' | 'failed' | 'cancelled',
   now: number,
   error: string | undefined,
+  extra?: { exitCode?: number, output?: string },
 ): JobRecord {
   const index = job.executions.findIndex(execution => execution.id === executionId)
   if (index === -1) return job
   const execution = job.executions[index]
   if (execution.endedAt !== undefined) return job
-  const settled: ExecutionRecord = { ...execution, endedAt: now, result: outcome, error }
+  const settled: ExecutionRecord = {
+    ...execution,
+    endedAt: now,
+    result: outcome,
+    error,
+    ...(extra?.exitCode !== undefined ? { exitCode: extra.exitCode } : {}),
+    ...(extra?.output !== undefined ? { output: extra.output } : {}),
+  }
   const executions = [...job.executions]
   executions[index] = settled
   const status: JobStatus = outcome === 'succeeded' ? 'done'
