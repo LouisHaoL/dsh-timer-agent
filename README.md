@@ -4,7 +4,7 @@
 
 一个 [DeepSeek Harness (DSH)](https://github.com/) Web GUI 插件:调研 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) 的 cron 系统后,按其「定时器 ↔ Agent 协同」思路实现的 **host 常驻定时任务引擎**——`dsh web` 服务启动即生效,**GUI 页面关闭也照常触发**。
 
-![新建任务弹窗:可折叠项目/会话树 + cron 预设](docs/screenshot.png)
+![新建任务弹窗:项目/会话树 + Agent 预设 + cron 定时(截图数据已脱敏)](docs/screenshot.png)
 
 ## 它做什么
 

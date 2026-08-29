@@ -4,7 +4,7 @@
 
 A [DeepSeek Harness (DSH)](https://github.com/) Web GUI plugin: a **host-resident scheduled-jobs engine** built after studying the cron system of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) and following its "timer ↔ agent coordination" design. It is live the moment the `dsh web` service starts — **it keeps firing with the GUI page closed**.
 
-![New-job modal: collapsible project/session tree + cron presets](docs/screenshot.png)
+![New-job modal: project/session tree + agent presets + cron schedule (screenshot data masked)](docs/screenshot.png)
 
 ## What it does
 

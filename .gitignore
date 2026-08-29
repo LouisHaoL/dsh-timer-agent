@@ -5,3 +5,4 @@ lib/
 .tmp-shots/
 
 .smoke-instance.log*
+.shot-instance.log*
