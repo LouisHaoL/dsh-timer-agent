@@ -142,6 +142,43 @@ export async function listModelOptions(): Promise<ModelOptions> {
   }
 }
 
+/** One agent-preset roster row (the new-session preset picker data source). */
+export interface PresetOption {
+  /** Stable preset id (the preset directory's name). */
+  id: string
+  /** Trust tier: shipped with the deployment vs authored locally. */
+  trust: 'system' | 'user'
+  /** Display name from the preset's metadata; absent falls back to the id. */
+  name?: string
+  /** One sentence on what the preset is for, when it published one. */
+  description?: string
+  /** Why this preset cannot compose a session; absent when it can. */
+  broken?: string
+}
+
+/** Host preset-options payload: the roster default plus the roster rows. */
+export interface PresetOptions {
+  /** Deployment default preset id, when the service answers. */
+  default?: string
+  /** Discovered presets, first-root-wins per id. */
+  presets: PresetOption[]
+}
+
+/** Fetch host preset options (empty roster when the route is unreachable). */
+export async function listPresetOptions(): Promise<PresetOptions> {
+  try {
+    const response = await fetch('/api/dsh-timer-agent/preset-options')
+    if (!response.ok) return { presets: [] }
+    const body = await response.json() as Partial<PresetOptions>
+    return {
+      ...body.default === undefined ? {} : { default: body.default },
+      presets: Array.isArray(body.presets) ? body.presets : [],
+    }
+  } catch {
+    return { presets: [] }
+  }
+}
+
 /** Last non-empty path segment (both separators), for short labels. */
 function pathBasename(path: string): string {
   const name = path.split(/[\\/]/).filter(Boolean).pop()

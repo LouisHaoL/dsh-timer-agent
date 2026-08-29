@@ -613,11 +613,15 @@ select.input { cursor: pointer; }
 
 /* --- target tree picker -------------------------------------------------------------- */
 
+/* Compact by default, user-resizable via the bottom-right drag handle
+   (textarea-style: resize needs a non-visible overflow to work on a div). */
 .targetTree {
   flex: 1 1 auto;
-  min-height: 90px;
-  max-height: 280px;
+  min-height: 84px;
+  height: 140px;
+  max-height: 420px;
   overflow-y: auto;
+  resize: vertical;
   padding: 4px;
   font-size: 13px;
   color: var(--dsw-alias-label-primary);
@@ -707,6 +711,32 @@ select.input { cursor: pointer; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Agent-preset dropdown riding the selected 新增会话 row (right-aligned,
+   clicking it must not disturb the row selection). */
+.presetSelect {
+  flex: none;
+  margin-left: auto;
+  max-width: 55%;
+  padding: 2px 6px;
+  font-size: 11.5px;
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-specific-input-major, var(--dsw-alias-bg-elevated, transparent));
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  outline: none;
+  cursor: pointer;
+}
+
+.presetSelect:focus { border-color: var(--dsw-alias-border-highlight, #4c8bf5); }
+
+/* Collapsed prompt preview: clamp to N text lines until 展开. */
+.promptBlockClamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
 }
 
 

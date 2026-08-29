@@ -110,6 +110,9 @@ export class RemoteBoardController {
       description: input.description,
       prompt: input.prompt,
       target: input.target,
+      ...input.kind !== 'command' && input.preset !== undefined && input.preset.trim() !== ''
+        ? { preset: input.preset }
+        : {},
       ...input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection },
       ...(cron !== undefined ? { cron } : {}),
       ...(input.kind === 'command'
@@ -131,7 +134,7 @@ export class RemoteBoardController {
     this.pendingCreateCron = cron
   }
 
-  async updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt' | 'command' | 'args'>> & { target?: SessionTarget; cron?: string; scheduleEnabled?: boolean; timeoutMinutes?: number; modelSelection?: JobModelSelection | null }): Promise<void> {
+  async updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt' | 'command' | 'args' | 'preset'>> & { target?: SessionTarget; cron?: string; scheduleEnabled?: boolean; timeoutMinutes?: number; modelSelection?: JobModelSelection | null }): Promise<void> {
     const body: Record<string, unknown> = { ...patch }
     if (patch.timeoutMinutes !== undefined) body.timeoutMinutes = patch.timeoutMinutes
     // modelSelection: object pins a model, null clears it (host deletes the
@@ -167,6 +170,13 @@ export class RemoteBoardController {
     if (patch.cron !== undefined) body.cron = patch.cron
     if (patch.enabled !== undefined) body.scheduleEnabled = patch.enabled
     const response = await this.fetchJson('PATCH', `/api/dsh-timer-agent/jobs?id=${encodeURIComponent(id)}`, body)
+    await this.refresh()
+    return response !== undefined && response.error === undefined
+  }
+
+  /** Skip the next scheduled fire (host rolls nextRunAt one occurrence). */
+  async skipNextRun(id: string): Promise<boolean> {
+    const response = await this.fetchJson('PATCH', `/api/dsh-timer-agent/jobs?id=${encodeURIComponent(id)}`, { skipNext: true })
     await this.refresh()
     return response !== undefined && response.error === undefined
   }

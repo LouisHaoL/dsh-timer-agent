@@ -17,7 +17,7 @@ export interface BoardControllerFace {
   openJob(id: string): void
   closeJob(): void
   createJob(input: NewJobInput): Promise<JobRecord | undefined> | JobRecord | undefined
-  updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt' | 'command' | 'args'>> & { target?: SessionTarget; cron?: string; scheduleEnabled?: boolean; timeoutMinutes?: number; modelSelection?: JobModelSelection | null }): Promise<void> | void
+  updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt' | 'command' | 'args' | 'preset'>> & { target?: SessionTarget; cron?: string; scheduleEnabled?: boolean; timeoutMinutes?: number; modelSelection?: JobModelSelection | null }): Promise<void> | void
   deleteJob(id: string): Promise<void> | void
   resetJob(id: string): Promise<void> | void
   /** Freeze a job: no schedule fires, no manual runs (host refuses while running). */
@@ -25,6 +25,8 @@ export interface BoardControllerFace {
   /** Un-archive a job back to idle; an armed schedule gets a fresh nextRunAt. */
   restartJob(id: string): Promise<void> | void
   setSchedule(id: string, patch: { enabled?: boolean; cron?: string }): boolean | Promise<boolean>
+  /** Skip the next scheduled fire: nextRunAt rolls forward one occurrence. */
+  skipNextRun(id: string): Promise<boolean> | boolean
   applyScheduleNextRun(id: string, nextRunAt: number | undefined, lastTriggeredAt: number | undefined): Promise<void> | void
   openSession(sessionId: string): void
   runJob(id: string): Promise<boolean> | boolean

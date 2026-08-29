@@ -9,7 +9,7 @@
 import { useEffect, useState } from 'react'
 import { selectedJobOf, type ControllerSnapshot } from '../../core/controller.ts'
 import { jobKind, type JobRecord, type JobStatus } from '../../core/jobs.ts'
-import type { TargetGroup, ModelOptions } from '../target-options.ts'
+import type { TargetGroup, ModelOptions, PresetOptions } from '../target-options.ts'
 import type { BoardControllerFace } from '../controller-face.ts'
 import { t, type TimerAgentKey } from '../locales.ts'
 import css from '../board.module.css'
@@ -50,7 +50,7 @@ function matchesFilter(job: JobRecord, filter: string): boolean {
 }
 
 /** Board component; subscribes to the controller snapshot. */
-export function TimerBoard({ controller, targetOptions, modelOptions }: { controller: BoardControllerFace; targetOptions: () => Promise<TargetGroup[]>; modelOptions: () => Promise<ModelOptions> }) {
+export function TimerBoard({ controller, targetOptions, modelOptions, presetOptions }: { controller: BoardControllerFace; targetOptions: () => Promise<TargetGroup[]>; modelOptions: () => Promise<ModelOptions>; presetOptions: () => Promise<PresetOptions> }) {
   const [snapshot, setSnapshot] = useState(controller.getSnapshot())
   useEffect(
     () => controller.subscribe(() => setSnapshot(controller.getSnapshot())),
@@ -159,13 +159,14 @@ export function TimerBoard({ controller, targetOptions, modelOptions }: { contro
       </div>
 
       {selected !== undefined && (
-        <JobDetail controller={controller} job={selected} targetOptions={targetOptions} modelOptions={modelOptions} />
+        <JobDetail controller={controller} job={selected} targetOptions={targetOptions} modelOptions={modelOptions} presetOptions={presetOptions} />
       )}
       {showNew && (
         <NewJobModal
           controller={controller}
           targetOptions={targetOptions}
           modelOptions={modelOptions}
+          presetOptions={presetOptions}
           onClose={() => { setShowNew(false) }}
         />
       )}

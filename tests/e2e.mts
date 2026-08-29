@@ -382,6 +382,10 @@ section('timer_agent tool actions')
   await tool.execute({ action: 'update', job_id: jobId, prompt: 'new prompt', schedule: '*/30 * * * *' })
   const updated = (await s.load())[0]
   check('update changes prompt + cron', updated?.prompt === 'new prompt' && updated?.schedule?.cron === '*/30 * * * *')
+  await tool.execute({ action: 'update', job_id: jobId, preset: 'alpinario-ops' })
+  check('update pins preset', (await s.load())[0]?.preset === 'alpinario-ops')
+  await tool.execute({ action: 'update', job_id: jobId, preset: '' })
+  check('update preset="" clears it', (await s.load())[0]?.preset === undefined)
   await tool.execute({ action: 'update', job_id: jobId, timeout_minutes: 0 })
   check('update timeout_minutes=0 clears the limit', (await s.load())[0]?.timeoutMs === undefined)
   await tool.execute({ action: 'update', job_id: jobId, timeout_minutes: 2 })
@@ -406,7 +410,7 @@ section('HTTP routes: handlers + loopback fence')
   let now = Date.UTC(2026, 0, 1)
   const runner = new TimerRunner({ ctx: host.ctx, store: s, now: () => now })
   const routes = makeRoutes({ store: s, runner, ctx: host.ctx, now: () => now })
-  check('four routes composed', routes.length === 4)
+  check('five routes composed', routes.length === 5)
 
   const jobsRoute = routes.find(r => r.path.endsWith('/jobs'))!
   const runRoute = routes.find(r => r.path.endsWith('/jobs/run'))!
@@ -459,6 +463,22 @@ section('HTTP routes: handlers + loopback fence')
     && cronEditedJob.schedule?.cron === '0 10 * * *'
     && cronEditedJob.schedule?.nextRunAt === nextRunAtMs('0 10 * * *', now),
   `${cronEdited.status} ${cronEditedJob.schedule?.nextRunAt}`)
+
+  // PATCH skipNext: rolls nextRunAt forward ONE occurrence (skip the next fire)
+  const skipped = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${id}`, { skipNext: true }), skipped.res)
+  const skippedJob = JSON.parse(skipped.body).job as JobRecord
+  check('PATCH skipNext rolls nextRunAt one occurrence', skipped.status === 200
+    && skippedJob.schedule?.nextRunAt === nextRunAtMs('0 10 * * *', cronEditedJob.schedule?.nextRunAt ?? now),
+  `${skipped.status} ${skippedJob.schedule?.nextRunAt}`)
+  // skipNext on a job without an armed schedule → 400
+  const bareCreated = makeRes()
+  await jobsRoute.handler(makeReq('POST', '/api/dsh-timer-agent/jobs', { title: 'skip-bare' }), bareCreated.res)
+  const bareId = (JSON.parse(bareCreated.body).job as JobRecord).id
+  const skipBare = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${bareId}`, { skipNext: true }), skipBare.res)
+  check('PATCH skipNext without armed schedule → 400', skipBare.status === 400)
+  await jobsRoute.handler(makeReq('DELETE', `/api/dsh-timer-agent/jobs?id=${bareId}`), makeRes().res)
 
   // POST/PATCH timeoutMinutes
   const toCreated = makeRes()
@@ -549,6 +569,37 @@ section('HTTP routes: handlers + loopback fence')
     modelSelection: { provider: '', model: 'm1' },
   }), badModel.res)
   check('POST /jobs rejects invalid modelSelection', badModel.status === 400)
+
+  // Preset-options route (agentPresets absent → empty roster, still 200)
+  const poRoute = routes.find(r => r.path.endsWith('/preset-options'))!
+  const po = makeRes()
+  await poRoute.handler(makeReq('GET', '/api/dsh-timer-agent/preset-options'), po.res)
+  const poBody = JSON.parse(po.body) as { default?: unknown, presets: unknown[] }
+  check('GET /preset-options → 200 (empty without service)', po.status === 200 && poBody.presets.length === 0)
+
+  // POST /jobs with a preset persists it; PATCH sets and clears it
+  const withPreset = makeRes()
+  await jobsRoute.handler(makeReq('POST', '/api/dsh-timer-agent/jobs', {
+    title: 'preset job',
+    target: { workdir: '', sessionId: '' },
+    preset: 'alpinario-ops',
+  }), withPreset.res)
+  const withPresetBody = JSON.parse(withPreset.body) as { job?: JobRecord }
+  const presetJobId = withPresetBody.job?.id
+  check('POST /jobs persists preset', withPreset.status === 201 && withPresetBody.job?.preset === 'alpinario-ops')
+  const presetPatched = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${presetJobId}`, { preset: 'liangshen' }), presetPatched.res)
+  check('PATCH preset updates it', presetPatched.status === 200 && (JSON.parse(presetPatched.body).job as JobRecord).preset === 'liangshen')
+  const presetCleared = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${presetJobId}`, { preset: '' }), presetCleared.res)
+  const presetClearedJob = JSON.parse(presetCleared.body).job as JobRecord
+  check('PATCH preset="" clears it', presetCleared.status === 200 && presetClearedJob.preset === undefined)
+  // Command jobs never carry a preset
+  const cmdPreset = makeRes()
+  await jobsRoute.handler(makeReq('POST', '/api/dsh-timer-agent/jobs', {
+    title: 'cmd preset', kind: 'command', command: 'node', preset: 'alpinario-ops',
+  }), cmdPreset.res)
+  check('POST command job ignores preset', cmdPreset.status === 201 && (JSON.parse(cmdPreset.body).job as JobRecord).preset === undefined)
 }
 
 // ============================================================================
@@ -578,6 +629,16 @@ section('command: job model + ledger roundtrip')
   const agentJob = createJob({ title: 'a', description: '', prompt: 'p', target: { workdir: '', sessionId: '' } }, 1000, 'ag-1')
   check('agent job stays lean (no kind fields)', jobKind(agentJob) === 'agent' && agentJob.command === undefined && agentJob.args === undefined)
   check('commandLine of agent job is empty', commandLine(agentJob) === '')
+  check('createJob stores preset (agent)', createJob({
+    title: 'a2', description: '', prompt: 'p', target: { workdir: '', sessionId: '' }, preset: 'liangshen',
+  }, 1000, 'ag-2').preset === 'liangshen')
+  check('createJob drops blank preset', createJob({
+    title: 'a3', description: '', prompt: 'p', target: { workdir: '', sessionId: '' }, preset: '  ',
+  }, 1000, 'ag-3').preset === undefined)
+  check('createJob drops preset on command kind', createJob({
+    title: 'a4', description: '', prompt: '', kind: 'command', command: 'node',
+    target: { workdir: '', sessionId: '' }, preset: 'liangshen',
+  }, 1000, 'ag-4').preset === undefined)
 
   const file = join(tempDir, 'cmdstore.json')
   const cs = new HostJobStore(file)

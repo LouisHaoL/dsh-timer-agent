@@ -49,6 +49,9 @@ function summarize(job: JobRecord): JsonValue {
     result.target = job.target.sessionId !== ''
       ? { session: job.target.sessionId }
       : { workdir: job.target.workdir === '' ? '(default workspace)' : job.target.workdir, mode: 'new-session' }
+    if (job.target.sessionId === '' && job.preset !== undefined && job.preset !== '') {
+      result.preset = job.preset
+    }
   }
   // NOTE: every optional field must be added conditionally — an explicit
   // `undefined` property value fails the host's lossless-JSON tool-output
@@ -87,6 +90,7 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
       "action='list' shows all jobs; action='update' edits prompt/schedule/name/command/args; action='pause'/'resume' arms/disarms the schedule; action='archive' freezes a job (no schedule fires, no manual runs) and action='restart' un-archives it back to idle; action='remove' deletes; action='run' fires immediately in the background (returns at once).",
       "schedule syntax: 5-field cron like '0 9 * * *' (min hour day month weekday).",
       "session targeting (agent jobs only): leave both workdir and session empty → each run starts a NEW conversation in the default workspace; pass session=<existing session id> → every run continues that conversation (continuity); pass workdir=<absolute project path> → new sessions run inside that project. For command jobs, workdir is the process cwd.",
+      "preset (agent jobs with new sessions only): the agent-preset id new sessions are composed from (its tools/prompt sections/skills); empty = the deployment default. Ignored when session is pinned.",
       'Scheduled runs execute autonomously with no user present — prompts must not ask questions.',
     ].join('\n'),
     timeoutMs: 15000,
@@ -131,6 +135,10 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
         type: 'string',
         description: 'For create/update: pin an existing session id — every run continues that conversation instead of starting new ones. Pass empty string on update to clear.',
       },
+      preset: {
+        type: 'string',
+        description: "For create/update (agent jobs, new sessions only): agent-preset id the new sessions are composed from (its tools/prompt sections/skills); empty = the deployment default preset. Ignored when session is pinned. Pass empty string on update to clear.",
+      },
       timeout_minutes: {
         type: 'number',
         description: 'For create/update: cancel and fail a run still in flight after this many minutes (0 or negative clears the limit). Absent = unlimited.',
@@ -165,6 +173,7 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
       name?: string
       workdir?: string
       session?: string
+      preset?: string
       timeout_minutes?: number
     }): Promise<TimerToolOutput> {
       const action = (args.action ?? '').trim().toLowerCase()
@@ -195,6 +204,7 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
           prompt,
           ...(kind === 'command' ? { kind: 'command' as const, command, args: (args.args ?? '').trim() } : {}),
           target: { workdir: (args.workdir ?? '').trim(), sessionId: (args.session ?? '').trim() },
+          ...(kind === 'agent' && (args.preset ?? '').trim() !== '' ? { preset: (args.preset ?? '').trim() } : {}),
         }, now(), randomUUID())
         const timeoutMs = normalizeTimeoutMs((args.timeout_minutes ?? 0) * 60_000)
         const withTimeout = timeoutMs === undefined ? job : { ...job, timeoutMs }
@@ -251,6 +261,13 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
           if (args.prompt !== undefined && args.prompt.trim() !== '') next = { ...next, prompt: args.prompt.trim() }
           if (args.workdir !== undefined) next = { ...next, target: { ...next.target, workdir: args.workdir.trim() } }
           if (args.session !== undefined) next = { ...next, target: { ...next.target, sessionId: args.session.trim() } }
+          // Preset pin/clear (agent jobs; pinned sessions ignore it).
+          if (args.preset !== undefined) {
+            const preset = args.preset.trim()
+            next = { ...next }
+            if (preset === '' || jobKind(next) === 'command') delete next.preset
+            else next.preset = preset
+          }
           // Kind switch (agent ↔ command): rebase the execution fields so the
           // row stays coherent with its new kind.
           if (args.kind !== undefined) {

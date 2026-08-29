@@ -8,7 +8,7 @@
  */
 import { createRoot, type Root } from 'react-dom/client'
 import type { TargetGroup } from './target-options.ts'
-import { listModelOptions, type ModelOptions } from './target-options.ts'
+import { listModelOptions, listPresetOptions, type ModelOptions, type PresetOptions } from './target-options.ts'
 import type { BoardControllerFace } from './controller-face.ts'
 import { TimerBoard } from './board/TimerBoard.tsx'
 import css from './board.module.css'
@@ -51,6 +51,7 @@ export function mountBoard(controller: BoardControllerFace, targetOptions: () =>
   let root: Root | undefined
   let container: HTMLDivElement | undefined
   const modelOptions = (): Promise<ModelOptions> => listModelOptions()
+  const presetOptions = (): Promise<PresetOptions> => listPresetOptions()
 
   const ensure = (): void => {
     if (container !== undefined) return
@@ -61,7 +62,7 @@ export function mountBoard(controller: BoardControllerFace, targetOptions: () =>
     container.className = css.boardView
     column.appendChild(container)
     root = createRoot(container)
-    root.render(<TimerBoard controller={controller} targetOptions={targetOptions} modelOptions={modelOptions} />)
+    root.render(<TimerBoard controller={controller} targetOptions={targetOptions} modelOptions={modelOptions} presetOptions={presetOptions} />)
   }
 
   // The frame mounts after boot settlement; watch for the column's arrival.

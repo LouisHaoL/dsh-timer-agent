@@ -93,6 +93,14 @@ export interface SessionTarget {
 }
 
 /**
+ * Agent-preset id a NEW session is composed from (agent jobs only, and only
+ * meaningful while {@link SessionTarget.sessionId} is blank — a pinned
+ * session keeps the preset its history was produced under). Absent/blank →
+ * the deployment roster default.
+ */
+export type JobPreset = string
+
+/**
  * Per-job model selection: which provider/model a run uses. Absent → the
  * default resolution (a pinned session keeps its own selection; a new
  * session falls back to the deployment `agentDefaultModel`).
@@ -127,6 +135,12 @@ export interface JobRecord {
   status: JobStatus
   /** Session targeting (see {@link SessionTarget}). */
   target: SessionTarget
+  /**
+   * Agent-preset id for NEW sessions (agent jobs with no pinned session);
+   * absent/blank → the deployment roster default. Ignored for pinned
+   * sessions and command jobs.
+   */
+  preset?: JobPreset
   /** Model override for runs (absent → default resolution). */
   modelSelection?: JobModelSelection
   /** Creation instant (ms epoch). */
@@ -181,6 +195,8 @@ export interface NewJobInput {
   /** Command jobs: argument string (quote-aware split). */
   args?: string
   target: SessionTarget
+  /** Agent-preset id for new sessions (absent/blank → roster default). */
+  preset?: JobPreset
   /** Model override for runs (absent → default resolution). */
   modelSelection?: JobModelSelection
 }
@@ -211,6 +227,9 @@ export function createJob(input: NewJobInput, now: number, id: string): JobRecor
     } : {}),
     status: 'idle',
     target: { ...input.target },
+    ...(kind === 'agent' && input.preset !== undefined && input.preset.trim() !== ''
+      ? { preset: input.preset.trim() }
+      : {}),
     ...input.modelSelection === undefined ? {} : { modelSelection: { ...input.modelSelection } },
     createdAt: now,
     updatedAt: now,

@@ -11,6 +11,7 @@
  * - POST   /api/dsh-timer-agent/jobs/run?id=… → fire now (background)
  * - GET    /api/dsh-timer-agent/workspaces    → host workspace registry {id,path}
  * - GET    /api/dsh-timer-agent/model-options → default model + provider/model catalog
+ * - GET    /api/dsh-timer-agent/preset-options→ default preset id + preset roster
  *
  * @module dsh-timer-agent/routes
  */
@@ -157,6 +158,8 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
           writeJson(res, 400, { error: 'modelSelection must be { provider, model }' })
           return
         }
+        // Agent-preset id for new sessions (agent jobs; blank → default).
+        const preset = kind === 'agent' && typeof body.preset === 'string' ? body.preset.trim() : ''
         let job = createJob({
           title,
           description: typeof body.description === 'string' ? body.description : '',
@@ -166,6 +169,7 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
             workdir: typeof target.workdir === 'string' ? target.workdir.trim() : '',
             sessionId: typeof target.sessionId === 'string' ? target.sessionId.trim() : '',
           },
+          ...(preset === '' ? {} : { preset }),
           ...modelSelection === undefined ? {} : { modelSelection },
         }, deps.now(), randomUUID())
         if (typeof body.timeoutMinutes === 'number') {
@@ -238,6 +242,15 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
             else next = { ...next, modelSelection }
             if (modelSelection === undefined) delete (next as { modelSelection?: JobModelSelection }).modelSelection
           }
+          // Agent-preset id for new sessions: a non-empty string pins it, an
+          // empty string clears it (back to the roster default); absent =
+          // untouched. Command jobs never carry one.
+          if (typeof body.preset === 'string') {
+            const preset = body.preset.trim()
+            next = { ...next }
+            if (preset === '' || next.kind === 'command') delete next.preset
+            else next.preset = preset
+          }
           if (typeof body.target === 'object' && body.target !== null) {
             const target = body.target as Record<string, unknown>
             next = {
@@ -281,6 +294,17 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
             if (next.schedule?.enabled === true && isValidCron(cron)) {
               next = withSchedule(next, { enabled: true, nextRunAt: nextRunAtMs(cron, deps.now()) }, deps.now())
             }
+          }
+          // Skip-once: roll nextRunAt forward ONE occurrence so the next fire
+          // is dropped. Base = max(nextRunAt, now): a future nextRunAt skips
+          // the displayed run; a stale (missed) nextRunAt skips the imminent
+          // catch-up fire instead of landing on an already-past ghost.
+          if (body.skipNext === true) {
+            const cron = next.schedule?.cron ?? ''
+            if (next.schedule?.enabled !== true || !isValidCron(cron)) return undefined
+            const skipped = nextRunAtMs(cron, Math.max(next.schedule.nextRunAt ?? deps.now(), deps.now()))
+            if (skipped === undefined) return undefined
+            next = withSchedule(next, { enabled: true, nextRunAt: skipped }, deps.now())
           }
           return { jobs: jobs.map(candidate => (candidate.id === id ? next : candidate)), result: next }
         })
@@ -401,5 +425,53 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
     },
   }
 
-  return [jobsRoute, runRoute, workspacesRoute, modelOptionsRoute]
+  const presetOptionsRoute: HostRoute = {
+    kind: 'exact',
+    path: '/api/dsh-timer-agent/preset-options',
+    handler: async (req, res) => {
+      if (!isLoopbackRequest(req)) {
+        writeJson(res, 403, { error: 'forbidden: loopback-only' })
+        return
+      }
+      if (req.method !== 'GET') {
+        writeJson(res, 405, { error: `method not allowed: ${req.method}` })
+        return
+      }
+      // The roster default plus every discovered preset row (broken ones
+      // included — the picker shows them as unusable rather than hiding the
+      // id a job may already reference). Absent service → empty roster.
+      const presets = deps.ctx.get('agentPresets')
+      if (presets === undefined) {
+        writeJson(res, 200, { presets: [] })
+        return
+      }
+      let rows: ReadonlyArray<{
+        id: string; trust: string; name?: string; description?: string; broken?: string
+      }>
+      try {
+        rows = await presets.list()
+      } catch (error) {
+        writeJson(res, 500, { error: `preset roster failed: ${error instanceof Error ? error.message : String(error)}` })
+        return
+      }
+      let defaultId: string | undefined
+      try {
+        defaultId = presets.defaultId
+      } catch {
+        defaultId = undefined
+      }
+      writeJson(res, 200, {
+        ...defaultId === undefined ? {} : { default: defaultId },
+        presets: rows.map(row => ({
+          id: row.id,
+          trust: row.trust,
+          ...row.name === undefined ? {} : { name: row.name },
+          ...row.description === undefined ? {} : { description: row.description },
+          ...row.broken === undefined ? {} : { broken: row.broken },
+        })),
+      })
+    },
+  }
+
+  return [jobsRoute, runRoute, workspacesRoute, modelOptionsRoute, presetOptionsRoute]
 }

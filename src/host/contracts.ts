@@ -97,6 +97,20 @@ export interface HostAgentPresets {
   resolve(id?: string): Promise<{ readonly id: string }>
   /** Join one agent's scope to a preset's standing composition. */
   mount(agentCtx: object, id?: string): Promise<unknown>
+  /** The preset id mounted when a caller names none (roster default). */
+  readonly defaultId: string
+  /** Every preset the configured roots currently supply (roster rows). */
+  list(): Promise<ReadonlyArray<HostAgentPresetRow>>
+}
+
+/** One roster row from `agentPresets.list()` (discovery shape, trimmed). */
+export interface HostAgentPresetRow {
+  readonly id: string
+  readonly trust: 'system' | 'user'
+  readonly name?: string
+  readonly description?: string
+  /** Why this preset cannot compose a session; absent when it can. */
+  readonly broken?: string
 }
 
 /**

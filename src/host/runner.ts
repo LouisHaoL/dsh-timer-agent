@@ -421,13 +421,16 @@ export class TimerRunner {
     if (seed !== undefined) {
       agentOptions = { provider: seed.provider, model: seed.model }
     }
-    // Join the deployment's default agent preset: without it the new session
-    // runs on the empty global layer — no tool packages, no preset prompt
-    // sections. A broken default preset fails the run loudly (creation rolls
-    // back with the resolver's error), matching the GUI's behavior.
+    // Join the deployment's agent preset: without it the new session runs
+    // on the empty global layer — no tool packages, no preset prompt
+    // sections. The job's own preset id (agent jobs targeting new sessions)
+    // wins; otherwise the roster default. A broken default preset fails the
+    // run loudly (creation rolls back with the resolver's error), matching
+    // the GUI's behavior; a job-pinned id the roster no longer supplies
+    // degrades to the default with a warning instead of failing forever.
     let presetMeta: { agentPreset: string } | undefined
     let presetSetup: ((agentCtx: object) => Promise<void>) | undefined
-    ;({ presetMeta, presetSetup } = await this.composeDefaultPreset())
+    ;({ presetMeta, presetSetup } = await this.composePreset(job.preset))
     const handle = await agents.create({
       sessionId,
       ...(agentOptions !== undefined ? { agentOptions } : {}),
@@ -441,21 +444,33 @@ export class TimerRunner {
   }
 
   /**
-   * Compose a NEW session's default preset: resolve the roster default, record
-   * it on the session header, and join the agent's scope to its standing
-   * mount inside the factory setup hook (api-proxy composeAgent precedent —
-   * the join decides the agent's tools, prompt sections, and skills, so a
-   * session created bare resolves them against the empty global layer).
-   * Undefined parts when no roster is composed; a broken default preset
-   * rejects so creation rolls back with the resolver's error.
+   * Compose a NEW session's preset: resolve the wanted id (or the roster
+   * default when blank), record it on the session header, and join the
+   * agent's scope to its standing mount inside the factory setup hook
+   * (api-proxy composeAgent precedent — the join decides the agent's tools,
+   * prompt sections, and skills, so a session created bare resolves them
+   * against the empty global layer). Undefined parts when no roster is
+   * composed; a broken preset rejects so creation rolls back with the
+   * resolver's error — except a job-pinned id the roster no longer knows,
+   * which degrades to the default (warned) rather than failing every run.
    */
-  private async composeDefaultPreset(): Promise<{
+  private async composePreset(wanted?: string): Promise<{
     presetMeta: { agentPreset: string } | undefined
     presetSetup: ((agentCtx: object) => Promise<void>) | undefined
   }> {
     const presets = this.ctx.get('agentPresets')
     if (presets === undefined) return { presetMeta: undefined, presetSetup: undefined }
-    const resolvedId = (await presets.resolve()).id
+    let resolvedId: string
+    if (wanted !== undefined && wanted.trim() !== '') {
+      try {
+        resolvedId = (await presets.resolve(wanted)).id
+      } catch (error) {
+        console.warn(`[dsh-timer-agent] job preset "${wanted}" is not on the roster; falling back to the default:`, error)
+        resolvedId = (await presets.resolve()).id
+      }
+    } else {
+      resolvedId = (await presets.resolve()).id
+    }
     return {
       presetMeta: { agentPreset: resolvedId },
       presetSetup: async agentCtx => { await presets.mount(agentCtx, resolvedId) },

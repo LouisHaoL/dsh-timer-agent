@@ -12,12 +12,17 @@
 import { useEffect, useMemo, useState } from 'react'
 import { isValidCron, nextRunAtMs } from '../../core/schedule.ts'
 import { commandLine, jobKind, timeoutLabel, type ExecutionRecord, type JobRecord } from '../../core/jobs.ts'
-import type { TargetGroup, ModelOptions } from '../target-options.ts'
+import type { ModelOptions, PresetOptions, TargetGroup } from '../target-options.ts'
 import type { BoardControllerFace } from '../controller-face.ts'
 import { t, type TimerAgentKey } from '../locales.ts'
 import css from '../board.module.css'
 import { formatTime, STATUS_LABEL_KEY } from './TimerBoard.tsx'
 import { DEFAULT_TARGET_GROUPS, leavesOf, modelLeavesOf, TargetTree } from './NewJobModal.tsx'
+
+/** How many execution rows show before the 全部/收起 toggle. */
+const EXECUTION_PREVIEW_COUNT = 3
+/** Collapsed prompt height, in text lines (line-clamp). */
+const PROMPT_PREVIEW_LINES = 4
 
 /** Execution outcome → locale key. */
 const RESULT_KEY: Record<NonNullable<ExecutionRecord['result']>, TimerAgentKey> = {
@@ -80,8 +85,10 @@ const SCHEDULE_PRESETS: ReadonlyArray<{ cron: string; label: TimerAgentKey }> = 
 /** Human label for a job's session target. */
 function targetLabel(job: JobRecord): string {
   if (job.target.sessionId !== '') return `${t('detail.target.session')} (${job.target.sessionId})`
-  if (job.target.workdir !== '') return `${job.target.workdir} · ${t('detail.target.new')}`
-  return t('detail.target.default')
+  const base = job.target.workdir !== '' ? `${job.target.workdir} · ${t('detail.target.new')}` : t('detail.target.default')
+  // Only new-session targets carry a preset (pinned sessions keep their own).
+  if (job.preset !== undefined && job.preset !== '') return `${base} · ${t('detail.target.preset')}: ${job.preset}`
+  return base
 }
 
 /** Normalize a path for matching (case-fold, forward slashes, no trailing). */
@@ -132,7 +139,7 @@ function modelLabel(job: JobRecord): string {
 }
 
 /** Job detail overlay. */
-export function JobDetail({ controller, job, targetOptions, modelOptions }: { controller: BoardControllerFace; job: JobRecord; targetOptions: () => Promise<TargetGroup[]>; modelOptions: () => Promise<ModelOptions> }) {
+export function JobDetail({ controller, job, targetOptions, modelOptions, presetOptions }: { controller: BoardControllerFace; job: JobRecord; targetOptions: () => Promise<TargetGroup[]>; modelOptions: () => Promise<ModelOptions>; presetOptions: () => Promise<PresetOptions> }) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const running = job.status === 'running'
   const archived = job.status === 'archived'
@@ -141,6 +148,14 @@ export function JobDetail({ controller, job, targetOptions, modelOptions }: { co
   const [latest, setLatest] = useState(job)
   useEffect(() => { setLatest(job) }, [job])
   const current = latest
+
+  // Read-mode fold states; reset when the detail switches to another job.
+  const [showAllExecutions, setShowAllExecutions] = useState(false)
+  const [promptExpanded, setPromptExpanded] = useState(false)
+  useEffect(() => {
+    setShowAllExecutions(false)
+    setPromptExpanded(false)
+  }, [job.id])
 
   const canEdit = !running && !archived
   const isCommand = jobKind(current) === 'command'
@@ -160,6 +175,8 @@ export function JobDetail({ controller, job, targetOptions, modelOptions }: { co
   const [timeoutDraft, setTimeoutDraft] = useState(current.timeoutMs !== undefined ? String(Math.round(current.timeoutMs / 60_000)) : '')
   const [modelOptionsState, setModelOptionsState] = useState<ModelOptions>({ groups: [] })
   const [modelKey, setModelKey] = useState('')
+  const [presetOptionsState, setPresetOptionsState] = useState<PresetOptions>({ presets: [] })
+  const [presetDraft, setPresetDraft] = useState(current.preset ?? '')
   const [error, setError] = useState<string | undefined>(undefined)
 
   /** All leaves across groups, for resolving the current selection. */
@@ -184,6 +201,7 @@ export function JobDetail({ controller, job, targetOptions, modelOptions }: { co
     setCommandDraft(current.command ?? '')
     setArgsDraft(current.args ?? '')
     setWorkdirDraft(current.target.workdir)
+    setPresetDraft(current.preset ?? '')
     setCronDraft(current.schedule?.cron ?? '0 9 * * *')
     setScheduleEnabledDraft(current.schedule?.enabled ?? false)
     setTimeoutDraft(current.timeoutMs !== undefined ? String(Math.round(current.timeoutMs / 60_000)) : '')
@@ -193,6 +211,7 @@ export function JobDetail({ controller, job, targetOptions, modelOptions }: { co
     const sel = current.modelSelection
     setModelKey(sel === undefined ? '' : `${sel.provider}\u0000${sel.model}`)
     void modelOptions().then(next => { setModelOptionsState(next) }).catch(() => undefined)
+    void presetOptions().then(next => { setPresetOptionsState(next) }).catch(() => undefined)
     void targetOptions().then(next => {
       const loaded = next.length > 0 ? next : DEFAULT_TARGET_GROUPS
       setGroups(loaded)
@@ -264,6 +283,9 @@ export function JobDetail({ controller, job, targetOptions, modelOptions }: { co
     void Promise.resolve(controller.updateJob(current.id, {
       prompt: promptDraft,
       target: { workdir: selectedTarget.workdir, sessionId: selectedTarget.sessionId },
+      // Preset follows the target: a new session carries the pinned preset,
+      // switching to a pinned session clears it (that session keeps its own).
+      preset: selectedTarget.sessionId === '' ? presetDraft.trim() : '',
       cron,
       scheduleEnabled: scheduleEnabledDraft,
       ...(Number.isFinite(timeoutMinutes) ? { timeoutMinutes } : {}),
@@ -297,6 +319,12 @@ export function JobDetail({ controller, job, targetOptions, modelOptions }: { co
   const draftCronValid = cronDraft.trim() !== '' && isValidCron(cronDraft.trim())
   const draftNextRun = scheduleEnabledDraft && draftCronValid
     ? nextRunAtMs(cronDraft.trim(), Date.now())
+    : undefined
+  // Skip-once preview: where 下次运行 lands if the next fire is skipped
+  // (same max(nextRunAt, now) base the host uses; re-render keeps it fresh).
+  const liveCron = current.schedule?.cron ?? ''
+  const skipTarget = enabled && nextRunAt !== undefined && isValidCron(liveCron)
+    ? nextRunAtMs(liveCron, Math.max(nextRunAt, Date.now()))
     : undefined
 
   return (
@@ -381,14 +409,35 @@ export function JobDetail({ controller, job, targetOptions, modelOptions }: { co
               {editing ? (
                 <textarea
                   className={css.input}
-                  style={{ width: '100%', minHeight: '160px', resize: 'vertical', fontFamily: 'inherit', lineHeight: '1.5', boxSizing: 'border-box' }}
+                  style={{ width: '100%', minHeight: '96px', resize: 'vertical', fontFamily: 'inherit', lineHeight: '1.5', boxSizing: 'border-box' }}
                   value={promptDraft}
                   placeholder={t('new.promptPlaceholder')}
                   aria-label={t('detail.prompt')}
                   onChange={event => { setPromptDraft(event.target.value) }}
                 />
               ) : (
-                <pre className={css.promptBlock}>{current.prompt !== '' ? current.prompt : current.title}</pre>
+                (() => {
+                  const text = current.prompt !== '' ? current.prompt : current.title
+                  const foldable = text.split('\n').length > PROMPT_PREVIEW_LINES
+                  return (
+                    <>
+                      <pre
+                        className={`${css.promptBlock}${promptExpanded || !foldable ? '' : ` ${css.promptBlockClamped}`}`}
+                      >
+                        {text}
+                      </pre>
+                      {foldable && (
+                        <button
+                          type="button"
+                          className={css.linkButton}
+                          onClick={() => { setPromptExpanded(prev => !prev) }}
+                        >
+                          {promptExpanded ? t('detail.prompt.collapse') : t('detail.prompt.view')}
+                        </button>
+                      )}
+                    </>
+                  )
+                })()
               )}
             </section>
           )}
@@ -404,6 +453,10 @@ export function JobDetail({ controller, job, targetOptions, modelOptions }: { co
                     selectedKey={selectedKey}
                     onToggle={toggleGroup}
                     onSelect={setSelectedKey}
+                    presetOptions={presetOptionsState.presets}
+                    presetDefault={presetOptionsState.default}
+                    presetId={presetDraft}
+                    onPresetChange={setPresetDraft}
                   />
                   <span className={css.fieldHint}>{t('new.target.hint')}</span>
                 </>
@@ -503,8 +556,18 @@ export function JobDetail({ controller, job, targetOptions, modelOptions }: { co
                   {enabled ? (current.schedule?.cron ?? '') : t('detail.schedule.notScheduled')}
                 </p>
                 <p className={css.scheduleMeta}>
-                  {t('detail.schedule.nextRun')} {nextLabel}
-                  {' · '}{t('detail.schedule.lastTriggered')} {lastLabel}
+                  {t('detail.schedule.lastTriggered')} {lastLabel}
+                  {' · '}{t('detail.schedule.nextRun')} {nextLabel}
+                  {skipTarget !== undefined && !archived && (
+                    <button
+                      type="button"
+                      className={css.linkButton}
+                      title={t('detail.schedule.skipHint', { time: new Date(skipTarget).toLocaleString() })}
+                      onClick={() => { void controller.skipNextRun(current.id) }}
+                    >
+                      {t('detail.schedule.skip')} ⏭
+                    </button>
+                  )}
                 </p>
               </>
             )}
@@ -542,17 +605,35 @@ export function JobDetail({ controller, job, targetOptions, modelOptions }: { co
             <h4>{t('detail.execution')}</h4>
             {current.executions.length === 0 ? (
               <p className={css.detailText}>{t('detail.noExecution')}</p>
-            ) : (
-              <ul className={css.executionList}>
-                {[...current.executions].reverse().map(execution => (
-                  <ExecutionRow
-                    key={execution.id}
-                    execution={execution}
-                    onOpen={sessionId => { controller.openSession(sessionId) }}
-                  />
-                ))}
-              </ul>
-            )}
+            ) : (() => {
+              // Most recent first; collapsed shows only the latest few.
+              const all = [...current.executions].reverse()
+              const shown = showAllExecutions ? all : all.slice(0, EXECUTION_PREVIEW_COUNT)
+              return (
+                <>
+                  <ul className={css.executionList}>
+                    {shown.map(execution => (
+                      <ExecutionRow
+                        key={execution.id}
+                        execution={execution}
+                        onOpen={sessionId => { controller.openSession(sessionId) }}
+                      />
+                    ))}
+                  </ul>
+                  {all.length > EXECUTION_PREVIEW_COUNT && (
+                    <button
+                      type="button"
+                      className={css.linkButton}
+                      onClick={() => { setShowAllExecutions(prev => !prev) }}
+                    >
+                      {showAllExecutions
+                        ? t('detail.execution.collapse')
+                        : t('detail.execution.showAll', { count: String(all.length) })}
+                    </button>
+                  )}
+                </>
+              )
+            })()}
           </section>
         </div>
 

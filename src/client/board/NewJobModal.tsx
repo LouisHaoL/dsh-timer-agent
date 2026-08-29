@@ -9,7 +9,7 @@
  * conversation (hermes context_from semantics).
  */
 import { useEffect, useMemo, useState } from 'react'
-import type { ModelOptions, TargetGroup } from '../target-options.ts'
+import type { ModelOptions, PresetOption, PresetOptions, TargetGroup } from '../target-options.ts'
 import type { BoardControllerFace } from '../controller-face.ts'
 import { isValidCron } from '../../core/schedule.ts'
 import { t, type TimerAgentKey } from '../locales.ts'
@@ -57,17 +57,37 @@ interface ModelLeaf {
   model: string
 }
 
+/** Option label for one preset row (name + id when they differ). */
+export function presetOptionLabel(preset: PresetOption): string {
+  const name = preset.name ?? ''
+  const label = name !== '' && name !== preset.id ? `${name} (${preset.id})` : preset.id
+  return preset.broken !== undefined ? `⚠ ${label}` : label
+}
+
 /**
  * The collapsible session-target tree (shared by the new-job modal and the
  * job-detail editor). Pure presentational: callers own groups/selection.
+ *
+ * When `presetOptions` is supplied and a "new session" leaf is the SELECTED
+ * row, that row also carries the agent-preset dropdown (a pinned session
+ * keeps the preset its history was produced under, so session rows never
+ * show one).
  */
-export function TargetTree({ groups, expanded, selectedKey, onToggle, onSelect }: {
+export function TargetTree({ groups, expanded, selectedKey, onToggle, onSelect, presetOptions, presetDefault, presetId, onPresetChange }: {
   groups: TargetGroup[]
   expanded: ReadonlySet<string>
   selectedKey: string
   onToggle(key: string): void
   onSelect(key: string): void
+  /** Preset roster powering the new-session dropdown (omit → none shown). */
+  presetOptions?: PresetOption[]
+  /** Roster default id, for the "follow default" option label. */
+  presetDefault?: string
+  /** Currently pinned preset id ('' = follow the default). */
+  presetId?: string
+  onPresetChange?(id: string): void
 }) {
+  const stop = (event: { stopPropagation(): void }): void => { event.stopPropagation() }
   return (
     <div className={css.targetTree} role="tree" aria-label={t('new.target')}>
       {groups.map(group => {
@@ -87,20 +107,68 @@ export function TargetTree({ groups, expanded, selectedKey, onToggle, onSelect }
             </button>
             {open && (
               <div className={css.targetGroupBody}>
-                {leaves.map(leaf => (
-                  <button
-                    key={leaf.key}
-                    type="button"
-                    role="treeitem"
-                    aria-selected={leaf.key === selectedKey}
-                    className={`${css.targetRow} ${leaf.key === selectedKey ? css.targetRowSelected : ''}`}
-                    onClick={() => { onSelect(leaf.key) }}
-                    title={leaf.sessionId === '' ? `${group.name} · 新增会话` : leaf.label}
-                  >
-                    <span className={css.targetRowDot} aria-hidden="true" />
-                    <span className={css.targetRowLabel}>{leaf.label}</span>
-                  </button>
-                ))}
+                {leaves.map(leaf => {
+                  const selected = leaf.key === selectedKey
+                  // The new-session leaf carries the preset dropdown while
+                  // selected; a <select> cannot nest inside a <button>, so
+                  // that row renders as a div (still a treeitem).
+                  if (leaf.sessionId === '' && presetOptions !== undefined && selected) {
+                    const known = presetId === '' || presetOptions.some(preset => preset.id === presetId)
+                    const defaultLabel = presetDefault !== undefined
+                      ? `${t('new.preset.followDefault')}（${presetDefault}）`
+                      : t('new.preset.followDefault')
+                    return (
+                      <div
+                        key={leaf.key}
+                        role="treeitem"
+                        aria-selected={selected}
+                        className={`${css.targetRow} ${css.targetRowSelected}`}
+                        onClick={() => { onSelect(leaf.key) }}
+                        title={`${group.name} · ${leaf.label}`}
+                      >
+                        <span className={css.targetRowDot} aria-hidden="true" />
+                        <span className={css.targetRowLabel}>{leaf.label}</span>
+                        <select
+                          className={css.presetSelect}
+                          value={presetId ?? ''}
+                          aria-label={t('new.preset')}
+                          onClick={stop}
+                          onMouseDown={stop}
+                          onChange={event => { onPresetChange?.(event.target.value) }}
+                        >
+                          <option value="">{defaultLabel}</option>
+                          {!known && presetId !== '' && (
+                            <option value={presetId}>{presetId}</option>
+                          )}
+                          {presetOptions.map(preset => (
+                            <option
+                              key={preset.id}
+                              value={preset.id}
+                              title={preset.broken ?? preset.description ?? preset.id}
+                              disabled={preset.broken !== undefined}
+                            >
+                              {presetOptionLabel(preset)}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )
+                  }
+                  return (
+                    <button
+                      key={leaf.key}
+                      type="button"
+                      role="treeitem"
+                      aria-selected={selected}
+                      className={`${css.targetRow} ${selected ? css.targetRowSelected : ''}`}
+                      onClick={() => { onSelect(leaf.key) }}
+                      title={leaf.sessionId === '' ? `${group.name} · ${leaf.label}` : leaf.label}
+                    >
+                      <span className={css.targetRowDot} aria-hidden="true" />
+                      <span className={css.targetRowLabel}>{leaf.label}</span>
+                    </button>
+                  )
+                })}
               </div>
             )}
           </div>
@@ -127,7 +195,7 @@ export function modelLeavesOf(options: ModelOptions): ModelLeaf[] {
 }
 
 /** New-job form overlay. */
-export function NewJobModal({ controller, targetOptions, modelOptions, onClose }: { controller: BoardControllerFace; targetOptions: () => Promise<TargetGroup[]>; modelOptions: () => Promise<ModelOptions>; onClose: () => void }) {
+export function NewJobModal({ controller, targetOptions, modelOptions, presetOptions, onClose }: { controller: BoardControllerFace; targetOptions: () => Promise<TargetGroup[]>; modelOptions: () => Promise<ModelOptions>; presetOptions: () => Promise<PresetOptions>; onClose: () => void }) {
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [prompt, setPrompt] = useState('')
@@ -140,6 +208,8 @@ export function NewJobModal({ controller, targetOptions, modelOptions, onClose }
   const [selectedKey, setSelectedKey] = useState('default:new')
   const [modelOptionsState, setModelOptionsState] = useState<ModelOptions>({ groups: [] })
   const [modelKey, setModelKey] = useState('')
+  const [presetOptionsState, setPresetOptionsState] = useState<PresetOptions>({ presets: [] })
+  const [presetId, setPresetId] = useState('')
   const [cronEnabled, setCronEnabled] = useState(false)
   const [cron, setCron] = useState('0 9 * * *')
   const [error, setError] = useState<string | undefined>(undefined)
@@ -155,8 +225,11 @@ export function NewJobModal({ controller, targetOptions, modelOptions, onClose }
     void modelOptions().then(next => {
       if (alive) setModelOptionsState(next)
     }).catch(() => undefined)
+    void presetOptions().then(next => {
+      if (alive) setPresetOptionsState(next)
+    }).catch(() => undefined)
     return () => { alive = false }
-  }, [targetOptions, modelOptions])
+  }, [targetOptions, modelOptions, presetOptions])
 
   /** All leaves across groups, for resolving the current selection. */
   const leafOf = useMemo(() => {
@@ -216,6 +289,8 @@ export function NewJobModal({ controller, targetOptions, modelOptions, onClose }
       description,
       prompt,
       target: { workdir: selected.workdir, sessionId: selected.sessionId },
+      // A pinned session keeps its own preset; only new sessions carry one.
+      ...(selected.sessionId === '' && presetId.trim() !== '' ? { preset: presetId.trim() } : {}),
       ...model === undefined ? {} : { modelSelection: { provider: model.provider, model: model.model } },
     })
     void Promise.resolve(created).then(job => {
@@ -344,6 +419,10 @@ export function NewJobModal({ controller, targetOptions, modelOptions, onClose }
                 selectedKey={selectedKey}
                 onToggle={toggleGroup}
                 onSelect={setSelectedKey}
+                presetOptions={presetOptionsState.presets}
+                presetDefault={presetOptionsState.default}
+                presetId={presetId}
+                onPresetChange={setPresetId}
               />
               <span className={css.fieldHint}>{t('new.target.hint')}</span>
             </div>
