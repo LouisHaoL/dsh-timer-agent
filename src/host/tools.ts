@@ -35,9 +35,6 @@ export interface TimerToolDeps {
 /** One job row summarized for the model (compact, no execution history dump). */
 function summarize(job: JobRecord): JsonValue {
   const last = job.executions[job.executions.length - 1]
-  const schedule = job.schedule?.enabled === true
-    ? { cron: job.schedule.cron, next_run_at: job.schedule.nextRunAt !== undefined ? new Date(job.schedule.nextRunAt).toISOString() : undefined }
-    : undefined
   const result: Record<string, JsonValue> = {
     id: job.id,
     title: job.title,
@@ -53,15 +50,23 @@ function summarize(job: JobRecord): JsonValue {
       ? { session: job.target.sessionId }
       : { workdir: job.target.workdir === '' ? '(default workspace)' : job.target.workdir, mode: 'new-session' }
   }
-  if (schedule !== undefined) result.schedule = schedule as JsonValue
+  // NOTE: every optional field must be added conditionally — an explicit
+  // `undefined` property value fails the host's lossless-JSON tool-output
+  // validation (JSON.stringify would silently drop it, the validator does not).
+  if (job.schedule?.enabled === true) {
+    const schedule: Record<string, JsonValue> = { cron: job.schedule.cron }
+    if (job.schedule.nextRunAt !== undefined) schedule.next_run_at = new Date(job.schedule.nextRunAt).toISOString()
+    result.schedule = schedule
+  }
   if (job.timeoutMs !== undefined) result.timeout_minutes = Math.round(job.timeoutMs / 60_000)
   if (last !== undefined) {
-    result.last_execution = {
+    const lastExecution: Record<string, JsonValue> = {
       result: last.result ?? 'running',
       at: new Date(last.startedAt).toISOString(),
-      session: jobKind(job) === 'command' ? undefined : last.sessionId,
-      exit_code: last.exitCode,
-    } as JsonValue
+    }
+    if (jobKind(job) !== 'command' && last.sessionId !== undefined) lastExecution.session = last.sessionId
+    if (last.exitCode !== undefined) lastExecution.exit_code = last.exitCode
+    result.last_execution = lastExecution
   }
   return result as JsonValue
 }
