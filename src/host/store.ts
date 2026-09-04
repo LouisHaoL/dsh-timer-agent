@@ -9,11 +9,38 @@
  * {@link parseLedger} from the shared core so a corrupted file degrades to
  * dropping invalid rows, never to a crashed ticker.
  */
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { parseLedger } from '../core/store.ts'
 import type { JobRecord } from '../core/jobs.ts'
+
+/**
+ * Windows-resilient replace: rename over an existing file fails with
+ * EPERM/EACCES when the destination is transiently locked (another dsh
+ * instance holding the ledger open, an AV scan, etc.). Retry with backoff,
+ * then degrade to copy+unlink — not atomic, but a save must never take down
+ * the host (newer dsh treats plugin load errors as fatal boot failures).
+ */
+const RENAME_ATTEMPTS = 5
+
+async function replaceFile(temp: string, dest: string): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await rename(temp, dest)
+      return
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (code !== 'EPERM' && code !== 'EACCES') throw err
+      if (attempt >= RENAME_ATTEMPTS) {
+        await copyFile(temp, dest)
+        await unlink(temp).catch(() => {})
+        return
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50 * 2 ** (attempt - 1)))
+    }
+  }
+}
 
 /** Default ledger location: ~/.dsh/timer-agent/jobs.json. */
 export function defaultJobsFile(): string {
@@ -70,6 +97,6 @@ export class HostJobStore {
     await mkdir(dir, { recursive: true })
     const temp = `${this.file}.tmp-${process.pid}-${Date.now()}`
     await writeFile(temp, `${JSON.stringify(jobs, null, 2)}\n`, 'utf8')
-    await rename(temp, this.file)
+    await replaceFile(temp, this.file)
   }
 }
