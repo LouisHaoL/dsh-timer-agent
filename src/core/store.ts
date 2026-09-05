@@ -7,7 +7,7 @@
  * The seam keeps the backend swappable (e.g. an IndexedDB or a host-file
  * channel later); validation repairs malformed rows field by field.
  */
-import { isValidCron } from './schedule.ts'
+import { isIntervalRule, isValidCron } from './schedule.ts'
 import type { ExecutionRecord, JobRecord, JobStatus, ScheduleRule, SessionTarget } from './jobs.ts'
 import { isJobStatus } from './jobs.ts'
 
@@ -69,17 +69,24 @@ function normalizeStatus(status: unknown): JobStatus {
 }
 
 /**
- * Repair a persisted schedule rule: drop rules without a usable cron string;
- * coerce booleans; leave `nextRunAt`/`lastTriggeredAt` undefined when missing.
+ * Repair a persisted schedule rule: keep cron rules with a usable expression
+ * and fixed-interval rules (intervalMinutes > 0, cron then ''); coerce
+ * booleans; leave `nextRunAt`/`lastTriggeredAt` undefined when missing.
  */
 function normalizeSchedule(schedule: unknown): ScheduleRule | undefined {
   if (typeof schedule !== 'object' || schedule === null) return undefined
   const rule = schedule as Record<string, unknown>
   if (typeof rule.cron !== 'string') return undefined
-  if (rule.cron.trim() === '' || !isValidCron(rule.cron)) return undefined
+  // Fixed-interval mode: intervalMinutes > 0 replaces cron as the schedulable
+  // field (an interval job has cron === '' and must not be dropped here).
+  const intervalMinutes = typeof rule.intervalMinutes === 'number' && rule.intervalMinutes > 0
+    ? Math.round(rule.intervalMinutes)
+    : undefined
+  if (!isIntervalRule({ intervalMinutes }) && (rule.cron.trim() === '' || !isValidCron(rule.cron))) return undefined
   return {
-    enabled: rule.enabled === true,
-    cron: rule.cron,
+    enabled: rule.enabled === true && (rule.cron.trim() !== '' || intervalMinutes !== undefined),
+    cron: intervalMinutes !== undefined ? '' : rule.cron,
+    ...(intervalMinutes !== undefined ? { intervalMinutes } : {}),
     nextRunAt: typeof rule.nextRunAt === 'number' ? rule.nextRunAt : undefined,
     lastTriggeredAt: typeof rule.lastTriggeredAt === 'number' ? rule.lastTriggeredAt : undefined,
   }

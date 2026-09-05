@@ -66,6 +66,12 @@ export interface ScheduleRule {
   enabled: boolean
   /** 5-field cron expression: `分 时 日 月 周`. */
   cron: string
+  /**
+   * Fixed-interval mode (minutes, measured from the last trigger). When set
+   * (> 0) it takes precedence over `cron` (which is then '') — use for
+   * "every 302 minutes" style cadences a cron grid cannot express.
+   */
+  intervalMinutes?: number
   /** Next due instant (ms epoch); maintained by the scheduler/controller. */
   nextRunAt: number | undefined
   /** Instant of the latest scheduled trigger (ms epoch). */
@@ -272,11 +278,18 @@ export function withSchedule(
   const schedule: ScheduleRule = {
     enabled: current?.enabled ?? false,
     cron: current?.cron ?? '',
+    ...(current?.intervalMinutes !== undefined ? { intervalMinutes: current.intervalMinutes } : {}),
     nextRunAt: current?.nextRunAt,
     lastTriggeredAt: current?.lastTriggeredAt,
   }
   if ('enabled' in patch) schedule.enabled = patch.enabled ?? false
   if ('cron' in patch) schedule.cron = patch.cron ?? ''
+  if ('intervalMinutes' in patch) {
+    if (patch.intervalMinutes !== undefined && patch.intervalMinutes > 0) {
+      schedule.intervalMinutes = Math.round(patch.intervalMinutes)
+      schedule.cron = ''
+    } else delete schedule.intervalMinutes
+  }
   if ('nextRunAt' in patch) schedule.nextRunAt = patch.nextRunAt
   if ('lastTriggeredAt' in patch) schedule.lastTriggeredAt = patch.lastTriggeredAt
   return { ...job, updatedAt: now, schedule }

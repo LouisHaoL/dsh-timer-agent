@@ -9,7 +9,7 @@
  */
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import { randomUUID } from 'node:crypto'
-import { isValidCron, nextRunAtMs } from '../core/schedule.ts'
+import { isIntervalRule, isSchedulable, isValidCron, nextRunAtMs, scheduleNextMs } from '../core/schedule.ts'
 import {
   createJob, jobKind, normalizeTimeoutMs, withSchedule, withStatus, withRunRequest,
   type JobRecord,
@@ -57,7 +57,10 @@ function summarize(job: JobRecord): JsonValue {
   // `undefined` property value fails the host's lossless-JSON tool-output
   // validation (JSON.stringify would silently drop it, the validator does not).
   if (job.schedule?.enabled === true) {
-    const schedule: Record<string, JsonValue> = { cron: job.schedule.cron }
+    // Fixed-interval mode: interval_minutes replaces cron as the schedulable field.
+    const schedule: Record<string, JsonValue> = isIntervalRule(job.schedule)
+      ? { interval_minutes: job.schedule.intervalMinutes! }
+      : { cron: job.schedule.cron }
     if (job.schedule.nextRunAt !== undefined) schedule.next_run_at = new Date(job.schedule.nextRunAt).toISOString()
     result.schedule = schedule
   }
@@ -88,7 +91,7 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
       "Two job kinds: kind='agent' (default) fires a real agent session from a self-contained prompt; kind='command' (普通任务) directly spawns command+args with no AI — use it for scripts that just need a timer.",
       "action='create' schedules a new job (requires schedule; agent jobs also require prompt — self-contained, scheduled runs get no current-chat context unless session is pinned; command jobs require command instead).",
       "action='list' shows all jobs; action='update' edits prompt/schedule/name/command/args; action='pause'/'resume' arms/disarms the schedule; action='archive' freezes a job (no schedule fires, no manual runs) and action='restart' un-archives it back to idle; action='remove' deletes; action='run' fires immediately in the background (returns at once).",
-      "schedule syntax: 5-field cron like '0 9 * * *' (min hour day month weekday).",
+      "schedule syntax: 5-field cron like '0 9 * * *' (min hour day month weekday), OR pass interval_minutes instead for a fixed interval from the last trigger (e.g. every 302 minutes — a cadence a cron grid cannot express).",
       "session targeting (agent jobs only): leave both workdir and session empty → each run starts a NEW conversation in the default workspace; pass session=<existing session id> → every run continues that conversation (continuity); pass workdir=<absolute project path> → new sessions run inside that project. For command jobs, workdir is the process cwd.",
       "preset (agent jobs with new sessions only): the agent-preset id new sessions are composed from (its tools/prompt sections/skills); empty = the deployment default. Ignored when session is pinned.",
       'Scheduled runs execute autonomously with no user present — prompts must not ask questions.',
@@ -121,7 +124,11 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
       },
       schedule: {
         type: 'string',
-        description: "For create (required) / update: 5-field cron, e.g. '0 9 * * *' daily at 9am, '*/30 * * * *' every 30 minutes.",
+        description: "For create (required unless interval_minutes is set) / update: 5-field cron, e.g. '0 9 * * *' daily at 9am, '*/30 * * * *' every 30 minutes. Setting it switches the job back to cron mode from interval mode.",
+      },
+      interval_minutes: {
+        type: 'number',
+        description: 'For create/update: fixed-interval alternative to schedule — fire every N minutes measured from the last trigger (> 0 switches to interval mode, clearing cron; 0 or negative switches back to cron mode). Use for cadences cron cannot express, e.g. every 302 minutes.',
       },
       name: {
         type: 'string',
@@ -170,6 +177,7 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
       command?: string
       args?: string
       schedule?: string
+      interval_minutes?: number
       name?: string
       workdir?: string
       session?: string
@@ -186,11 +194,14 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
 
       if (action === 'create') {
         const cron = (args.schedule ?? '').trim()
+        const intervalMinutes = typeof args.interval_minutes === 'number' && args.interval_minutes > 0
+          ? Math.round(args.interval_minutes)
+          : undefined
         const prompt = (args.prompt ?? '').trim()
         const kind = args.kind === 'command' ? 'command' : 'agent'
         const command = (args.command ?? '').trim()
-        if (cron === '') return { kind: 'create', error: 'schedule is required for create' }
-        if (!isValidCron(cron)) return { kind: 'create', error: `invalid cron expression: ${cron}` }
+        if (cron === '' && intervalMinutes === undefined) return { kind: 'create', error: 'schedule (cron) or interval_minutes is required for create' }
+        if (cron !== '' && !isValidCron(cron)) return { kind: 'create', error: `invalid cron expression: ${cron}` }
         if (kind === 'command') {
           if (command === '') return { kind: 'create', error: "command is required for create with kind='command'" }
         } else if (prompt === '') {
@@ -208,7 +219,9 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
         }, now(), randomUUID())
         const timeoutMs = normalizeTimeoutMs((args.timeout_minutes ?? 0) * 60_000)
         const withTimeout = timeoutMs === undefined ? job : { ...job, timeoutMs }
-        const scheduled = withSchedule(withTimeout, { enabled: true, cron, nextRunAt: nextRunAtMs(cron, now()) }, now())
+        const scheduled = intervalMinutes !== undefined
+          ? withSchedule(withTimeout, { enabled: true, intervalMinutes, nextRunAt: now() + intervalMinutes * 60_000 }, now())
+          : withSchedule(withTimeout, { enabled: true, cron, nextRunAt: nextRunAtMs(cron, now()) }, now())
         await deps.store.mutate(jobs => ({ jobs: [...jobs, scheduled], result: true }))
         return { kind: 'create', job: summarize(scheduled) }
       }
@@ -240,12 +253,13 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
         const updated = await deps.store.mutate(jobs => {
           const job = jobs.find(candidate => candidate.id === id)
           if (job === undefined || job.schedule === undefined) return undefined
-          const cron = job.schedule?.cron ?? ''
-          if (enabled && !isValidCron(cron)) return undefined
-          const next = withSchedule(job, {
-            enabled,
-            nextRunAt: enabled ? nextRunAtMs(cron, now()) : undefined,
-          }, now())
+          if (enabled && !isSchedulable(job.schedule)) return undefined
+          const nextRunAt = enabled
+            ? (isIntervalRule(job.schedule)
+              ? now() + job.schedule.intervalMinutes! * 60_000
+              : nextRunAtMs(job.schedule.cron, now()))
+            : undefined
+          const next = withSchedule(job, { enabled, nextRunAt }, now())
           return { jobs: jobs.map(candidate => (candidate.id === id ? next : candidate)), result: next }
         })
         if (updated === undefined) return { kind: action, error: `job ${id} not found or has no usable schedule` }
@@ -295,13 +309,23 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
             if (timeoutMs === undefined) delete next.timeoutMs
             else next = { ...next, timeoutMs }
           }
+          if (args.interval_minutes !== undefined) {
+            // > 0 → interval mode (cron cleared); <= 0 → back to cron mode.
+            const intervalMinutes = args.interval_minutes > 0 ? Math.round(args.interval_minutes) : undefined
+            next = withSchedule(next, { intervalMinutes }, now())
+            if (next.schedule?.enabled === true && intervalMinutes !== undefined) {
+              next = withSchedule(next, { nextRunAt: scheduleNextMs(next.schedule, now()) }, now())
+            }
+          }
           if (args.schedule !== undefined) {
             const cron = args.schedule.trim()
             if (cron === '') return undefined
             if (!isValidCron(cron)) return undefined
             const wasEnabled = next.schedule?.enabled ?? false
+            // An explicit cron clears interval mode.
             next = withSchedule(next, {
               cron,
+              intervalMinutes: undefined,
               ...(wasEnabled ? { enabled: true, nextRunAt: nextRunAtMs(cron, now()) } : {}),
             }, now())
           }
@@ -338,9 +362,11 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
           }
           if (job.status !== 'archived') return undefined
           let next = withStatus(job, 'idle', now())
-          const cron = next.schedule?.cron ?? ''
-          if (next.schedule?.enabled === true && isValidCron(cron)) {
-            next = withSchedule(next, { enabled: true, nextRunAt: nextRunAtMs(cron, now()) }, now())
+          if (next.schedule?.enabled === true && isSchedulable(next.schedule)) {
+            const armed = isIntervalRule(next.schedule)
+              ? now() + next.schedule.intervalMinutes! * 60_000
+              : nextRunAtMs(next.schedule.cron, now())
+            next = withSchedule(next, { enabled: true, nextRunAt: armed }, now())
           }
           return { jobs: jobs.map(candidate => (candidate.id === id ? next : candidate)), result: next }
         })

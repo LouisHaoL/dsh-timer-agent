@@ -10,14 +10,14 @@
  * its own while editing.
  */
 import { useEffect, useMemo, useState } from 'react'
-import { isValidCron, nextRunAtMs } from '../../core/schedule.ts'
-import { commandLine, jobKind, timeoutLabel, type ExecutionRecord, type JobRecord } from '../../core/jobs.ts'
+import { isIntervalRule, isSchedulable, isValidCron, nextRunAtMs, scheduleNextMs } from '../../core/schedule.ts'
+import { commandLine, jobKind, timeoutLabel, type ExecutionRecord, type JobRecord, type ScheduleRule } from '../../core/jobs.ts'
 import type { ModelOptions, PresetOptions, TargetGroup } from '../target-options.ts'
 import type { BoardControllerFace } from '../controller-face.ts'
 import { t, type TimerAgentKey } from '../locales.ts'
 import css from '../board.module.css'
 import { formatTime, STATUS_LABEL_KEY } from './TimerBoard.tsx'
-import { DEFAULT_TARGET_GROUPS, leavesOf, modelLeavesOf, TargetTree } from './NewJobModal.tsx'
+import { DEFAULT_TARGET_GROUPS, intervalDraftMinutes, leavesOf, modelLeavesOf, TargetTree } from './NewJobModal.tsx'
 
 /** How many execution rows show before the 全部/收起 toggle. */
 const EXECUTION_PREVIEW_COUNT = 3
@@ -81,6 +81,25 @@ const SCHEDULE_PRESETS: ReadonlyArray<{ cron: string; label: TimerAgentKey }> = 
   { cron: '*/10 * * * *', label: 'detail.schedule.preset.tenMin' },
   { cron: '0 9 * * 1', label: 'detail.schedule.preset.weeklyMon9' },
 ]
+
+/** Human label for a fixed-interval rule: 每 N 分钟 / 小时 / 天. */
+function intervalLabel(minutes: number): string {
+  if (minutes % 1440 === 0) return t('detail.schedule.every', { n: String(minutes / 1440), unit: t('detail.schedule.unit.days') })
+  if (minutes % 60 === 0) return t('detail.schedule.every', { n: String(minutes / 60), unit: t('detail.schedule.unit.hours') })
+  return t('detail.schedule.every', { n: String(minutes), unit: t('detail.timeout.minutes') })
+}
+
+/** Read-mode label for a schedule rule: the cron expression or a prettified interval. */
+function scheduleLabel(schedule: ScheduleRule | undefined): string {
+  if (schedule === undefined) return t('detail.schedule.notScheduled')
+  return isIntervalRule(schedule) ? intervalLabel(schedule.intervalMinutes!) : schedule.cron
+}
+
+/** Split stored interval minutes into the value/unit draft fields. */
+function intervalDraftOf(minutes: number): { value: string; unit: '1' | '60' | '1440' } {
+  const unit = minutes % 1440 === 0 ? '1440' : minutes % 60 === 0 ? '60' : '1'
+  return { value: String(minutes / Number(unit)), unit }
+}
 
 /** Human label for a job's session target. */
 function targetLabel(job: JobRecord): string {
@@ -171,6 +190,9 @@ export function JobDetail({ controller, job, targetOptions, modelOptions, preset
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set<string>())
   const [selectedKey, setSelectedKey] = useState('')
   const [cronDraft, setCronDraft] = useState(current.schedule?.cron ?? '0 9 * * *')
+  const [scheduleModeDraft, setScheduleModeDraft] = useState<'cron' | 'interval'>(isIntervalRule(current.schedule) ? 'interval' : 'cron')
+  const [intervalValueDraft, setIntervalValueDraft] = useState(current.schedule !== undefined && isIntervalRule(current.schedule) ? intervalDraftOf(current.schedule.intervalMinutes!).value : '')
+  const [intervalUnitDraft, setIntervalUnitDraft] = useState<'1' | '60' | '1440'>(current.schedule !== undefined && isIntervalRule(current.schedule) ? intervalDraftOf(current.schedule.intervalMinutes!).unit : '1')
   const [scheduleEnabledDraft, setScheduleEnabledDraft] = useState(current.schedule?.enabled ?? false)
   const [timeoutDraft, setTimeoutDraft] = useState(current.timeoutMs !== undefined ? String(Math.round(current.timeoutMs / 60_000)) : '')
   const [modelOptionsState, setModelOptionsState] = useState<ModelOptions>({ groups: [] })
@@ -203,6 +225,9 @@ export function JobDetail({ controller, job, targetOptions, modelOptions, preset
     setWorkdirDraft(current.target.workdir)
     setPresetDraft(current.preset ?? '')
     setCronDraft(current.schedule?.cron ?? '0 9 * * *')
+    setScheduleModeDraft(current.schedule !== undefined && isIntervalRule(current.schedule) ? 'interval' : 'cron')
+    setIntervalValueDraft(current.schedule !== undefined && isIntervalRule(current.schedule) ? intervalDraftOf(current.schedule.intervalMinutes!).value : '')
+    setIntervalUnitDraft(current.schedule !== undefined && isIntervalRule(current.schedule) ? intervalDraftOf(current.schedule.intervalMinutes!).unit : '1')
     setScheduleEnabledDraft(current.schedule?.enabled ?? false)
     setTimeoutDraft(current.timeoutMs !== undefined ? String(Math.round(current.timeoutMs / 60_000)) : '')
     setError(undefined)
@@ -234,11 +259,22 @@ export function JobDetail({ controller, job, targetOptions, modelOptions, preset
     setError(undefined)
   }
 
-  /** One PATCH: prompt + target + cron + armed state, all at once. */
+  /** One PATCH: prompt + target + schedule (cron or interval) + armed state, all at once. */
   const saveEdit = (): void => {
     const cron = cronDraft.trim()
-    if (cron === '' ? scheduleEnabledDraft : !isValidCron(cron)) {
-      setError(t('detail.schedule.invalid'))
+    const draftInterval = scheduleModeDraft === 'interval'
+      ? intervalDraftMinutes(intervalValueDraft, intervalUnitDraft)
+      : undefined
+    // Cron mode: an empty expression only passes while disarmed; interval
+    // mode needs a whole number > 0 whenever it will be sent (always OK to
+    // omit while disarmed with a junk draft — the field is then untouched).
+    const schedulePatch: { cron?: string; intervalMinutes?: number } = scheduleModeDraft === 'interval'
+      ? (draftInterval !== undefined ? { intervalMinutes: draftInterval } : {})
+      : { cron, intervalMinutes: 0 }
+    if (scheduleModeDraft === 'interval'
+      ? (scheduleEnabledDraft && draftInterval === undefined)
+      : (cron === '' ? scheduleEnabledDraft : !isValidCron(cron))) {
+      setError(scheduleModeDraft === 'interval' ? t('detail.schedule.interval.invalid') : t('detail.schedule.invalid'))
       return
     }
     if (isCommand && commandDraft.trim() === '') {
@@ -253,7 +289,7 @@ export function JobDetail({ controller, job, targetOptions, modelOptions, preset
         command: commandDraft,
         args: argsDraft,
         target: { workdir: workdirDraft.trim(), sessionId: '' },
-        cron,
+        ...schedulePatch,
         scheduleEnabled: scheduleEnabledDraft,
         ...(() => {
           const timeoutMinutes = timeoutDraft.trim() === '' ? 0 : Number(timeoutDraft)
@@ -286,7 +322,7 @@ export function JobDetail({ controller, job, targetOptions, modelOptions, preset
       // Preset follows the target: a new session carries the pinned preset,
       // switching to a pinned session clears it (that session keeps its own).
       preset: selectedTarget.sessionId === '' ? presetDraft.trim() : '',
-      cron,
+      ...schedulePatch,
       scheduleEnabled: scheduleEnabledDraft,
       ...(Number.isFinite(timeoutMinutes) ? { timeoutMinutes } : {}),
       ...(modelSelection !== undefined ? { modelSelection } : {}),
@@ -317,14 +353,21 @@ export function JobDetail({ controller, job, targetOptions, modelOptions, preset
     ? '—'
     : new Date(current.schedule.lastTriggeredAt).toLocaleString()
   const draftCronValid = cronDraft.trim() !== '' && isValidCron(cronDraft.trim())
-  const draftNextRun = scheduleEnabledDraft && draftCronValid
-    ? nextRunAtMs(cronDraft.trim(), Date.now())
-    : undefined
+  const draftNextRun = !scheduleEnabledDraft
+    ? undefined
+    : scheduleModeDraft === 'interval'
+      ? (() => {
+          const minutes = intervalDraftMinutes(intervalValueDraft, intervalUnitDraft)
+          return minutes !== undefined ? Date.now() + minutes * 60_000 : undefined
+        })()
+      : draftCronValid ? nextRunAtMs(cronDraft.trim(), Date.now()) : undefined
   // Skip-once preview: where 下次运行 lands if the next fire is skipped
   // (same max(nextRunAt, now) base the host uses; re-render keeps it fresh).
-  const liveCron = current.schedule?.cron ?? ''
-  const skipTarget = enabled && nextRunAt !== undefined && isValidCron(liveCron)
-    ? nextRunAtMs(liveCron, Math.max(nextRunAt, Date.now()))
+  const liveSchedule = current.schedule
+  const skipTarget = enabled && nextRunAt !== undefined && liveSchedule !== undefined && isSchedulable(liveSchedule)
+    ? isIntervalRule(liveSchedule)
+      ? scheduleNextMs(liveSchedule, Math.max(nextRunAt, Date.now()))
+      : nextRunAtMs(liveSchedule.cron, Math.max(nextRunAt, Date.now()))
     : undefined
 
   return (
@@ -516,33 +559,81 @@ export function JobDetail({ controller, job, targetOptions, modelOptions, preset
                   />
                   <span>{t('detail.schedule.enable')}</span>
                 </label>
-                <div className={css.scheduleRow}>
-                  <input
-                    className={`${css.input} ${css.scheduleInput}${!draftCronValid ? ` ${css.scheduleInputInvalid}` : ''}`}
-                    value={cronDraft}
-                    placeholder="0 9 * * *"
-                    spellCheck={false}
-                    aria-label={t('detail.schedule.cron')}
-                    onChange={event => { setCronDraft(event.target.value); setError(undefined) }}
-                  />
-                  <select
-                    className={`${css.input} ${css.schedulePreset}`}
-                    value=""
-                    aria-label={t('detail.schedule.presets')}
-                    onChange={event => {
-                      const preset = event.target.value
-                      if (preset !== '') {
-                        setCronDraft(preset)
-                        setError(undefined)
-                      }
-                    }}
+                <div className={css.kindToggle} role="radiogroup" aria-label={t('detail.schedule')}>
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={scheduleModeDraft === 'cron'}
+                    className={`${css.kindOption} ${scheduleModeDraft === 'cron' ? css.kindOptionActive : ''}`}
+                    onClick={() => { setScheduleModeDraft('cron'); setError(undefined) }}
                   >
-                    <option value="">{t('detail.schedule.presets')}…</option>
-                    {SCHEDULE_PRESETS.map(preset => (
-                      <option key={preset.cron} value={preset.cron}>{t(preset.label)}</option>
-                    ))}
-                  </select>
+                    {t('detail.schedule.cron')}
+                  </button>
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={scheduleModeDraft === 'interval'}
+                    className={`${css.kindOption} ${scheduleModeDraft === 'interval' ? css.kindOptionActive : ''}`}
+                    onClick={() => { setScheduleModeDraft('interval'); setError(undefined) }}
+                  >
+                    {t('detail.schedule.modeInterval')}
+                  </button>
                 </div>
+                {scheduleModeDraft === 'cron' ? (
+                  <div className={css.scheduleRow}>
+                    <input
+                      className={`${css.input} ${css.scheduleInput}${!draftCronValid ? ` ${css.scheduleInputInvalid}` : ''}`}
+                      value={cronDraft}
+                      placeholder="0 9 * * *"
+                      spellCheck={false}
+                      aria-label={t('detail.schedule.cron')}
+                      onChange={event => { setCronDraft(event.target.value); setError(undefined) }}
+                    />
+                    <select
+                      className={`${css.input} ${css.schedulePreset}`}
+                      value=""
+                      aria-label={t('detail.schedule.presets')}
+                      onChange={event => {
+                        const preset = event.target.value
+                        if (preset !== '') {
+                          setCronDraft(preset)
+                          setError(undefined)
+                        }
+                      }}
+                    >
+                      <option value="">{t('detail.schedule.presets')}…</option>
+                      {SCHEDULE_PRESETS.map(preset => (
+                        <option key={preset.cron} value={preset.cron}>{t(preset.label)}</option>
+                      ))}
+                    </select>
+                  </div>
+                ) : (
+                  <>
+                    <div className={css.scheduleRow}>
+                      <input
+                        className={css.input}
+                        style={{ width: '120px' }}
+                        type="number"
+                        min={1}
+                        value={intervalValueDraft}
+                        placeholder="如 302"
+                        aria-label={t('detail.schedule.interval')}
+                        onChange={event => { setIntervalValueDraft(event.target.value); setError(undefined) }}
+                      />
+                      <select
+                        className={css.input}
+                        value={intervalUnitDraft}
+                        aria-label={t('detail.schedule.unit')}
+                        onChange={event => { setIntervalUnitDraft(event.target.value as '1' | '60' | '1440'); setError(undefined) }}
+                      >
+                        <option value="1">{t('detail.timeout.minutes')}</option>
+                        <option value="60">{t('detail.schedule.unit.hours')}</option>
+                        <option value="1440">{t('detail.schedule.unit.days')}</option>
+                      </select>
+                    </div>
+                    <span className={css.fieldHint}>{t('detail.schedule.intervalHint')}</span>
+                  </>
+                )}
                 {scheduleEnabledDraft && (
                   <p className={css.scheduleMeta}>
                     {t('detail.schedule.nextRun')}{' '}
@@ -553,7 +644,7 @@ export function JobDetail({ controller, job, targetOptions, modelOptions, preset
             ) : (
               <>
                 <p className={css.detailText}>
-                  {enabled ? (current.schedule?.cron ?? '') : t('detail.schedule.notScheduled')}
+                  {enabled ? scheduleLabel(current.schedule) : t('detail.schedule.notScheduled')}
                 </p>
                 <p className={css.scheduleMeta}>
                   {t('detail.schedule.lastTriggered')} {lastLabel}

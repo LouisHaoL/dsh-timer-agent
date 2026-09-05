@@ -104,7 +104,7 @@ export class RemoteBoardController {
   async createJob(input: NewJobInput): Promise<JobRecord | undefined> {
     const title = input.title.trim()
     if (title === '') return undefined
-    const cron = this.pendingCreateCron
+    const schedule = this.pendingCreateSchedule
     const response = await this.fetchJson('POST', '/api/dsh-timer-agent/jobs', {
       title,
       description: input.description,
@@ -114,7 +114,8 @@ export class RemoteBoardController {
         ? { preset: input.preset }
         : {},
       ...input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection },
-      ...(cron !== undefined ? { cron } : {}),
+      ...(schedule?.cron !== undefined ? { cron: schedule.cron } : {}),
+      ...(schedule?.intervalMinutes !== undefined ? { intervalMinutes: schedule.intervalMinutes } : {}),
       ...(input.kind === 'command'
         ? { kind: 'command', command: input.command ?? '', args: input.args ?? '' }
         : {}),
@@ -122,19 +123,19 @@ export class RemoteBoardController {
     if (response === undefined || response.error !== undefined) return undefined
     await this.refresh()
     const created = (response.job as JobRecord | undefined) ?? this.jobs[this.jobs.length - 1]
-    this.pendingCreateCron = undefined
+    this.pendingCreateSchedule = undefined
     return created
   }
 
-  /** Cron to arm on the next create (the modal stages it; the API takes it at create). */
-  private pendingCreateCron: string | undefined
+  /** Schedule to arm on the next create (the modal stages it; the API takes it at create). */
+  private pendingCreateSchedule: { cron?: string; intervalMinutes?: number } | undefined
 
-  /** Stage a cron for the next createJob call (NewJobModal's schedule field). */
-  stageCreateCron(cron: string | undefined): void {
-    this.pendingCreateCron = cron
+  /** Stage a cron/fixed-interval schedule for the next createJob call (NewJobModal's schedule field). */
+  stageCreateSchedule(schedule: { cron?: string; intervalMinutes?: number } | undefined): void {
+    this.pendingCreateSchedule = schedule
   }
 
-  async updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt' | 'command' | 'args' | 'preset'>> & { target?: SessionTarget; cron?: string; scheduleEnabled?: boolean; timeoutMinutes?: number; modelSelection?: JobModelSelection | null }): Promise<void> {
+  async updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt' | 'command' | 'args' | 'preset'>> & { target?: SessionTarget; cron?: string; intervalMinutes?: number; scheduleEnabled?: boolean; timeoutMinutes?: number; modelSelection?: JobModelSelection | null }): Promise<void> {
     const body: Record<string, unknown> = { ...patch }
     if (patch.timeoutMinutes !== undefined) body.timeoutMinutes = patch.timeoutMinutes
     // modelSelection: object pins a model, null clears it (host deletes the
@@ -165,9 +166,10 @@ export class RemoteBoardController {
     await this.refresh()
   }
 
-  async setSchedule(id: string, patch: { enabled?: boolean; cron?: string }): Promise<boolean> {
+  async setSchedule(id: string, patch: { enabled?: boolean; cron?: string; intervalMinutes?: number }): Promise<boolean> {
     const body: Record<string, unknown> = {}
     if (patch.cron !== undefined) body.cron = patch.cron
+    if (patch.intervalMinutes !== undefined) body.intervalMinutes = patch.intervalMinutes
     if (patch.enabled !== undefined) body.scheduleEnabled = patch.enabled
     const response = await this.fetchJson('PATCH', `/api/dsh-timer-agent/jobs?id=${encodeURIComponent(id)}`, body)
     await this.refresh()

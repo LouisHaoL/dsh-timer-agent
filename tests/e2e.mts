@@ -852,6 +852,161 @@ section('HTTP routes: command job create / patch / validate')
 }
 
 // ============================================================================
+// 8. fixed-interval schedule mode (ported from cloudcli-timer-agent)
+// ============================================================================
+const INTERVAL_MIN = 60_000
+section('TimerRunner: interval mode fires + rolls the grid from the fired instant')
+{
+  const host = makeFakeHost()
+  const s = new HostJobStore(join(tempDir, 'runner-interval.json'))
+  let now = Date.UTC(2026, 0, 1, 0, 0, 0)
+  const runner = new TimerRunner({ ctx: host.ctx, store: s, now: () => now })
+  runner.start()
+  runner.stop()
+
+  // Interval job whose nextRunAt is a day stale (host was down): the grid
+  // advances from the FIRED instant, not from "now" (no drift).
+  const firedAt = now - 24 * 60 * INTERVAL_MIN
+  let job = createJob({ title: 'every-302', description: '', prompt: 'go', target: { workdir: '', sessionId: '' } }, now, 'job-int')
+  job = withSchedule(job, { enabled: true, cron: '', intervalMinutes: 302, nextRunAt: firedAt }, now)
+  await s.mutate(jobs => ({ jobs: [...jobs, job], result: true }))
+
+  const fired = await runner.tick()
+  await new Promise(r => setTimeout(r, 25))
+  check('interval job fired', fired === 1, `fired=${fired}`)
+  const row = (await s.load())[0]
+  check('grid advanced from the fired instant (firedAt + N), not now + N',
+    row?.schedule?.nextRunAt === firedAt + 302 * INTERVAL_MIN,
+    `${row?.schedule?.nextRunAt} vs ${firedAt + 302 * INTERVAL_MIN}`)
+  check('lastTriggeredAt stamped with the fire time', row?.schedule?.lastTriggeredAt === now)
+
+  // Settle the run, then a manual run re-anchors the grid (下次 = 手动时刻 + N).
+  const created = host.calls.find(c => c.kind === 'create')
+  const agent = host.agentOf(created!.sessionId!)
+  const messageId = (agent as unknown as { lastMessageId?: string }).lastMessageId
+  host.emit(created!.sessionId!, 'user/message', { id: messageId })
+  host.emit(created!.sessionId!, 'turn/end', { turn: 1, reason: { kind: 'stop' } })
+  await new Promise(r => setTimeout(r, 25))
+
+  now += 7 * INTERVAL_MIN
+  const accepted = await runner.requestRun('job-int')
+  const afterManual = (await s.load())[0]
+  check('manual run accepted', accepted === true)
+  check('manual run re-anchors the interval grid (now + N)',
+    afterManual?.schedule?.nextRunAt === now + 302 * INTERVAL_MIN
+    && afterManual?.schedule?.lastTriggeredAt === now,
+    `${afterManual?.schedule?.nextRunAt}`)
+}
+
+section('HTTP routes: interval create / mode switch / arm / skip')
+{
+  const host = makeFakeHost()
+  const s = new HostJobStore(join(tempDir, 'routes-interval.json'))
+  let now = Date.UTC(2026, 0, 1)
+  const runner = new TimerRunner({ ctx: host.ctx, store: s, now: () => now })
+  const routes = makeRoutes({ store: s, runner, ctx: host.ctx, now: () => now })
+  const jobsRoute = routes.find(r => r.path.endsWith('/jobs'))!
+
+  const { Readable, Writable } = await import('node:stream')
+  function makeReq(method: string, url: string, body?: unknown): NodeIncomingMessage {
+    const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]) as unknown as NodeIncomingMessage
+    Object.assign(req, { method, url, headers: { host: '127.0.0.1:3080' }, socket: { remoteAddress: '127.0.0.1' } })
+    return req
+  }
+  function makeRes(): { res: NodeServerResponse; status: number; body: string } {
+    const state = { status: 0, body: '' }
+    const res = new Writable({ write(chunk, _enc, cb) { state.body += chunk.toString(); cb() } }) as unknown as NodeServerResponse
+    Object.assign(res, { writeHead: (status: number) => { state.status = status }, end: (chunk?: string | Buffer) => { if (chunk !== undefined) state.body += chunk.toString() } })
+    return { res, get status() { return state.status }, get body() { return state.body } }
+  }
+
+  // POST create in interval mode: armed, cron cleared, next run = now + N.
+  const created = makeRes()
+  await jobsRoute.handler(makeReq('POST', '/api/dsh-timer-agent/jobs', {
+    title: 'r-int', prompt: 'p', intervalMinutes: 90, target: { workdir: '', sessionId: '' },
+  }), created.res)
+  const createdJob = JSON.parse(created.body).job as JobRecord
+  check('POST intervalMinutes → 201 armed in interval mode', created.status === 201
+    && createdJob.schedule?.enabled === true && createdJob.schedule?.intervalMinutes === 90
+    && createdJob.schedule?.cron === '')
+  check('POST interval nextRunAt = now + N', createdJob.schedule?.nextRunAt === now + 90 * INTERVAL_MIN)
+
+  const id = createdJob.id
+  // PATCH back to cron mode (intervalMinutes: 0 + explicit cron).
+  const toCron = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${id}`, {
+    intervalMinutes: 0, cron: '0 9 * * *',
+  }), toCron.res)
+  const cronJob = JSON.parse(toCron.body).job as JobRecord
+  check('PATCH intervalMinutes=0 + cron → cron mode', toCron.status === 200
+    && cronJob.schedule?.intervalMinutes === undefined && cronJob.schedule?.cron === '0 9 * * *')
+
+  // PATCH to interval mode: a still-future nextRunAt is kept (hand-pinned
+  // first-run semantics), only the mode fields flip.
+  const cronNext = cronJob.schedule?.nextRunAt
+  const toInterval = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${id}`, { intervalMinutes: 30 }), toInterval.res)
+  const intJob = JSON.parse(toInterval.body).job as JobRecord
+  check('PATCH intervalMinutes=30 → interval mode, cron cleared', toInterval.status === 200
+    && intJob.schedule?.intervalMinutes === 30 && intJob.schedule?.cron === '')
+  check('still-future nextRunAt kept on the mode switch', intJob.schedule?.nextRunAt === cronNext)
+
+  // Disarm + re-arm: interval grid re-arms from now.
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${id}`, { scheduleEnabled: false }), makeRes().res)
+  const rearm = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${id}`, { scheduleEnabled: true }), rearm.res)
+  const armedJob = JSON.parse(rearm.body).job as JobRecord
+  check('re-arm schedules the interval from now', rearm.status === 200
+    && armedJob.schedule?.enabled === true && armedJob.schedule?.nextRunAt === now + 30 * INTERVAL_MIN)
+
+  // Skip-once: one whole interval forward from the displayed slot.
+  const skip = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${id}`, { skipNext: true }), skip.res)
+  const skippedJob = JSON.parse(skip.body).job as JobRecord
+  check('skipNext rolls one interval (base + N)', skip.status === 200
+    && skippedJob.schedule?.nextRunAt === now + 60 * INTERVAL_MIN)
+}
+
+section('timer_agent tool: interval_minutes create / update / resume')
+{
+  const host = makeFakeHost()
+  const s = new HostJobStore(join(tempDir, 'tool-interval.json'))
+  let now = Date.UTC(2026, 0, 1)
+  const runner = new TimerRunner({ ctx: host.ctx, store: s, now: () => now })
+  const registered: unknown[] = []
+  const disposer = registerTimerTool({ register: (def: unknown) => { registered.push(def); return () => {} } }, { store: s, runner, now: () => now })
+  const tool = registered[0] as { execute(args: Record<string, unknown>): Promise<Record<string, unknown>> }
+
+  const created = await tool.execute({ action: 'create', name: 'every-302', prompt: 'loop', interval_minutes: 302 }) as { job?: { schedule?: { interval_minutes?: number; cron?: string } } }
+  const row = (await s.load())[0]
+  check('create with interval_minutes arms the interval (cron cleared)',
+    row?.schedule?.intervalMinutes === 302 && row?.schedule?.cron === '' && row?.schedule?.enabled === true)
+  check('create summary reports interval_minutes', created.job?.schedule?.interval_minutes === 302)
+  const jobId = (await s.load())[0]?.id ?? ''
+
+  // Switch back to cron, then to a different interval.
+  await tool.execute({ action: 'update', job_id: jobId, interval_minutes: 0, schedule: '0 9 * * *' })
+  const cronRow = (await s.load())[0]
+  check('update interval_minutes=0 + schedule → cron mode',
+    cronRow?.schedule?.intervalMinutes === undefined && cronRow?.schedule?.cron === '0 9 * * *')
+  await tool.execute({ action: 'update', job_id: jobId, interval_minutes: 60 })
+  const intRow = (await s.load())[0]
+  check('update interval_minutes=60 → interval mode, armed from now',
+    intRow?.schedule?.intervalMinutes === 60 && intRow?.schedule?.cron === ''
+    && intRow?.schedule?.nextRunAt === now + 60 * INTERVAL_MIN)
+
+  // Pause / resume re-arms the interval grid from now.
+  await tool.execute({ action: 'pause', job_id: jobId })
+  check('pause disarms', (await s.load())[0]?.schedule?.enabled === false)
+  await tool.execute({ action: 'resume', job_id: jobId })
+  const resumed = (await s.load())[0]
+  check('resume re-arms the interval from now', resumed?.schedule?.enabled === true
+    && resumed?.schedule?.nextRunAt === now + 60 * INTERVAL_MIN)
+
+  disposer()
+}
+
+// ============================================================================
 rmSync(tempDir, { recursive: true, force: true })
 console.log(`\n== results: ${passed} passed, ${failed} failed`)
 if (failed > 0) process.exit(1)

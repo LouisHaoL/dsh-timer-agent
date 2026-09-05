@@ -20,7 +20,7 @@ import type {
 } from './contracts.ts'
 import { isTurnEndEvent, turnErrorDetail } from './contracts.ts'
 import type { HostJobStore } from './store.ts'
-import { nextRunAtMs } from '../core/schedule.ts'
+import { isIntervalRule, isSchedulable, nextRunAtMs, scheduleNextMs } from '../core/schedule.ts'
 import { appendCapped, splitCommandArgs, truncateOutputTail } from '../core/command.ts'
 import {
   settleExecution, startExecution, withSchedule, jobKind,
@@ -196,11 +196,18 @@ export class TimerRunner {
     const jobs = await this.store.load()
     let fired = 0
     for (const job of jobs) {
-      // 1. due schedule (archived jobs never fire)
+      // 1. due schedule (archived jobs never fire; cron or fixed interval)
       const schedule = job.schedule
       if (job.status !== 'archived'
-        && schedule !== undefined && schedule.enabled && schedule.nextRunAt !== undefined && schedule.nextRunAt <= this.now()) {
-        const next = nextRunAtMs(schedule.cron, schedule.nextRunAt)
+        && schedule !== undefined && schedule.enabled && isSchedulable(schedule)
+        && schedule.nextRunAt !== undefined && schedule.nextRunAt <= this.now()) {
+        const firedAt = schedule.nextRunAt
+        // Interval grids advance from the just-fired instant; cron follows
+        // its own grid (max(firedAt, nextRunAt) base keeps a skipped-running
+        // occurrence from rolling the grid backwards).
+        const next = isIntervalRule(schedule)
+          ? scheduleNextMs(schedule, firedAt)
+          : nextRunAtMs(schedule.cron, firedAt)
         if (await this.requestRun(job.id)) {
           fired += 1
           await this.store.mutate(current => {
@@ -246,10 +253,22 @@ export class TimerRunner {
       const targeting: ExecutionRecord['targeting'] = kind === 'command'
         ? 'command'
         : job.target.sessionId !== '' ? 'specified-session' : 'new-session'
-      const { job: next, execution } = startExecution(job, this.now(), randomUUID(), targeting)
+      const { job: openedJob, execution } = startExecution(job, this.now(), randomUUID(), targeting)
+      let next = openedJob
       if (kind === 'agent' && extraPrompt !== undefined && extraPrompt.trim() !== '') {
         execution.error = undefined
         next.prompt = `${next.prompt}\n\n## Run Context\n${extraPrompt}`.trim()
+      }
+      // A manual run counts as the last execution: an armed interval grid
+      // re-anchors on it (下次 = 手动时刻 + N). Scheduled fires re-roll the
+      // grid right after (tick branch 1), so this never shifts cron/interval
+      // grids that fire on their own.
+      if (next.schedule?.enabled === true && isIntervalRule(next.schedule)) {
+        next = withSchedule(
+          next,
+          { nextRunAt: this.now() + next.schedule.intervalMinutes! * 60_000, lastTriggeredAt: this.now() },
+          this.now(),
+        )
       }
       return {
         jobs: current.map(candidate => (candidate.id === jobId ? next : candidate)),

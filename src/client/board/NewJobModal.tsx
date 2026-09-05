@@ -36,6 +36,18 @@ export const DEFAULT_TARGET_GROUPS: TargetGroup[] = [
   { key: 'default', name: '默认工作空间', workdir: '', sessions: [] },
 ]
 
+/**
+ * Parse a fixed-interval draft (value + unit minutes) into total minutes.
+ * Undefined unless the value is a whole number > 0.
+ */
+export function intervalDraftMinutes(value: string, unit: string): number | undefined {
+  const count = Number(value)
+  const unitMinutes = Number(unit)
+  if (!Number.isInteger(count) || count <= 0) return undefined
+  if (!Number.isInteger(unitMinutes) || unitMinutes <= 0) return undefined
+  return count * unitMinutes
+}
+
 /** Flatten a group into its selectable leaves: new-session first, sessions after. */
 export function leavesOf(group: TargetGroup): Leaf[] {
   return [
@@ -210,8 +222,11 @@ export function NewJobModal({ controller, targetOptions, modelOptions, presetOpt
   const [modelKey, setModelKey] = useState('')
   const [presetOptionsState, setPresetOptionsState] = useState<PresetOptions>({ presets: [] })
   const [presetId, setPresetId] = useState('')
-  const [cronEnabled, setCronEnabled] = useState(false)
+  const [scheduleOn, setScheduleOn] = useState(false)
+  const [scheduleMode, setScheduleMode] = useState<'cron' | 'interval'>('cron')
   const [cron, setCron] = useState('0 9 * * *')
+  const [intervalValue, setIntervalValue] = useState('')
+  const [intervalUnit, setIntervalUnit] = useState<'1' | '60' | '1440'>('1')
   const [error, setError] = useState<string | undefined>(undefined)
 
   useEffect(() => {
@@ -262,8 +277,15 @@ export function NewJobModal({ controller, targetOptions, modelOptions, presetOpt
       setError(t('new.commandRequired'))
       return
     }
-    // Stage the cron so createJob arms the schedule server-side in one call.
-    controller.stageCreateCron?.(cronEnabled && isValidCron(cron) ? cron : undefined)
+    // Stage the schedule so createJob arms it server-side in one call.
+    controller.stageCreateSchedule?.(scheduleOn
+      ? scheduleMode === 'interval'
+        ? (() => {
+            const minutes = intervalDraftMinutes(intervalValue, intervalUnit)
+            return minutes !== undefined ? { intervalMinutes: minutes } : undefined
+          })()
+        : isValidCron(cron.trim()) ? { cron: cron.trim() } : undefined
+      : undefined)
     if (kind === 'command') {
       const created = controller.createJob({
         title,
@@ -448,39 +470,89 @@ export function NewJobModal({ controller, targetOptions, modelOptions, presetOpt
           <label className={css.scheduleToggle}>
             <input
               type="checkbox"
-              checked={cronEnabled}
-              onChange={event => { setCronEnabled(event.target.checked) }}
+              checked={scheduleOn}
+              onChange={event => { setScheduleOn(event.target.checked) }}
             />
             <span>{t('new.schedule.enable')}</span>
           </label>
-          {cronEnabled && (
-            <div className={css.scheduleRow}>
-              <input
-                className={`${css.input} ${css.scheduleInput}`}
-                value={cron}
-                placeholder="0 9 * * *"
-                spellCheck={false}
-                aria-label={t('new.schedule.cron')}
-                onChange={event => { setCron(event.target.value); setError(undefined) }}
-              />
-              <select
-                className={`${css.input} ${css.schedulePreset}`}
-                value=""
-                aria-label={t('detail.schedule.presets')}
-                onChange={event => {
-                  const preset = event.target.value
-                  if (preset !== '') {
-                    setCron(preset)
-                    setError(undefined)
-                  }
-                }}
-              >
-                <option value="">{t('detail.schedule.presets')}…</option>
-                {SCHEDULE_PRESETS.map(preset => (
-                  <option key={preset.cron} value={preset.cron}>{t(preset.label)}</option>
-                ))}
-              </select>
-            </div>
+          {scheduleOn && (
+            <>
+              <div className={css.kindToggle} role="radiogroup" aria-label={t('new.schedule')}>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={scheduleMode === 'cron'}
+                  className={`${css.kindOption} ${scheduleMode === 'cron' ? css.kindOptionActive : ''}`}
+                  onClick={() => { setScheduleMode('cron'); setError(undefined) }}
+                >
+                  {t('detail.schedule.cron')}
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={scheduleMode === 'interval'}
+                  className={`${css.kindOption} ${scheduleMode === 'interval' ? css.kindOptionActive : ''}`}
+                  onClick={() => { setScheduleMode('interval'); setError(undefined) }}
+                >
+                  {t('detail.schedule.modeInterval')}
+                </button>
+              </div>
+              {scheduleMode === 'cron' ? (
+                <div className={css.scheduleRow}>
+                  <input
+                    className={`${css.input} ${css.scheduleInput}`}
+                    value={cron}
+                    placeholder="0 9 * * *"
+                    spellCheck={false}
+                    aria-label={t('new.schedule.cron')}
+                    onChange={event => { setCron(event.target.value); setError(undefined) }}
+                  />
+                  <select
+                    className={`${css.input} ${css.schedulePreset}`}
+                    value=""
+                    aria-label={t('detail.schedule.presets')}
+                    onChange={event => {
+                      const preset = event.target.value
+                      if (preset !== '') {
+                        setCron(preset)
+                        setError(undefined)
+                      }
+                    }}
+                  >
+                    <option value="">{t('detail.schedule.presets')}…</option>
+                    {SCHEDULE_PRESETS.map(preset => (
+                      <option key={preset.cron} value={preset.cron}>{t(preset.label)}</option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <>
+                  <div className={css.scheduleRow}>
+                    <input
+                      className={css.input}
+                      style={{ width: '120px' }}
+                      type="number"
+                      min={1}
+                      value={intervalValue}
+                      placeholder="如 302"
+                      aria-label={t('detail.schedule.interval')}
+                      onChange={event => { setIntervalValue(event.target.value); setError(undefined) }}
+                    />
+                    <select
+                      className={css.input}
+                      value={intervalUnit}
+                      aria-label={t('detail.schedule.unit')}
+                      onChange={event => { setIntervalUnit(event.target.value as '1' | '60' | '1440'); setError(undefined) }}
+                    >
+                      <option value="1">{t('detail.timeout.minutes')}</option>
+                      <option value="60">{t('detail.schedule.unit.hours')}</option>
+                      <option value="1440">{t('detail.schedule.unit.days')}</option>
+                    </select>
+                  </div>
+                  <span className={css.fieldHint}>{t('detail.schedule.intervalHint')}</span>
+                </>
+              )}
+            </>
           )}
         </div>
 

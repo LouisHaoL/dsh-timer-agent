@@ -19,7 +19,7 @@ import { randomUUID } from 'node:crypto'
 import type {
   HostPluginContext, HostRoute, NodeIncomingMessage, NodeServerResponse,
 } from './contracts.ts'
-import { isValidCron, nextRunAtMs } from '../core/schedule.ts'
+import { intervalNextMs, isIntervalRule, isSchedulable, isValidCron, nextRunAtMs, scheduleNextMs } from '../core/schedule.ts'
 import { createJob, normalizeTimeoutMs, withSchedule, withStatus, type JobModelSelection, type JobRecord } from '../core/jobs.ts'
 import type { HostJobStore } from './store.ts'
 import type { TimerRunner } from './runner.ts'
@@ -101,6 +101,14 @@ function readModelSelection(value: unknown): JobModelSelection | 'invalid' | und
   return { provider, model }
 }
 
+/** Re-anchor a schedule at `now`: an interval grid continues from the last
+ *  trigger (stacking whole intervals past the gap); cron follows its grid. */
+function reanchorMs(schedule: NonNullable<JobRecord['schedule']>, now: number): number | undefined {
+  return isIntervalRule(schedule)
+    ? intervalNextMs(schedule.lastTriggeredAt, schedule.intervalMinutes!, now)
+    : scheduleNextMs(schedule, now)
+}
+
 /** Dependencies the routes close over. */
 export interface RouteDeps {
   store: HostJobStore
@@ -145,6 +153,10 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
           writeJson(res, 400, { error: `invalid cron expression: ${cron}` })
           return
         }
+        // Fixed-interval alternative to cron (minutes from the last trigger).
+        const intervalMinutes = typeof body.intervalMinutes === 'number' && body.intervalMinutes > 0
+          ? Math.round(body.intervalMinutes)
+          : undefined
         const kind = body.kind === 'command' ? 'command' : 'agent'
         const command = typeof body.command === 'string' ? body.command.trim() : ''
         const args = typeof body.args === 'string' ? body.args : ''
@@ -177,7 +189,13 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
           if (timeoutMs === undefined) delete job.timeoutMs
           else job = { ...job, timeoutMs }
         }
-        if (armCron) {
+        if (intervalMinutes !== undefined) {
+          job = withSchedule(
+            job,
+            { enabled: true, intervalMinutes, nextRunAt: deps.now() + intervalMinutes * 60_000 },
+            deps.now(),
+          )
+        } else if (armCron) {
           job = withSchedule(job, { enabled: true, cron, nextRunAt: nextRunAtMs(cron, deps.now()) }, deps.now())
         }
         await deps.store.mutate(jobs => ({ jobs: [...jobs, job], result: true }))
@@ -261,10 +279,23 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
               },
             }
           }
+          if (typeof body.intervalMinutes === 'number') {
+            // > 0 → fixed-interval mode (cron cleared); <= 0 → back to cron mode.
+            next = withSchedule(next, { intervalMinutes: body.intervalMinutes > 0 ? Math.round(body.intervalMinutes) : undefined }, deps.now())
+            if (next.schedule?.enabled === true &&
+              (next.schedule.nextRunAt === undefined || next.schedule.nextRunAt <= deps.now())) {
+              // Interval switch: keep a still-future nextRunAt (e.g. a hand-
+              // pinned first-run time); otherwise re-anchor on the last trigger.
+              const reanchored = reanchorMs(next.schedule, deps.now())
+              if (reanchored === undefined) return undefined
+              next = withSchedule(next, { nextRunAt: reanchored }, deps.now())
+            }
+          }
           if (typeof body.cron === 'string' && body.cron.trim() !== '') {
             const cron = body.cron.trim()
             if (!isValidCron(cron)) return undefined
-            next = withSchedule(next, { cron }, deps.now())
+            // An explicit cron clears interval mode.
+            next = withSchedule(next, { cron, intervalMinutes: undefined }, deps.now())
             // An armed schedule must pick up the NEW cron immediately: roll
             // nextRunAt from now so the displayed/effective next run matches
             // the edited expression instead of the stale one.
@@ -273,9 +304,13 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
             }
           }
           if (body.scheduleEnabled === true) {
-            const cron = next.schedule?.cron ?? ''
-            if (!isValidCron(cron)) return undefined
-            next = withSchedule(next, { enabled: true, nextRunAt: nextRunAtMs(cron, deps.now()) }, deps.now())
+            const schedule = next.schedule
+            if (schedule === undefined || !isSchedulable(schedule)) return undefined
+            const armed = isIntervalRule(schedule)
+              ? deps.now() + schedule.intervalMinutes! * 60_000
+              : nextRunAtMs(schedule.cron, deps.now())
+            if (armed === undefined) return undefined
+            next = withSchedule(next, { enabled: true, nextRunAt: armed }, deps.now())
           }
           if (body.scheduleEnabled === false) {
             next = withSchedule(next, { enabled: false, nextRunAt: undefined }, deps.now())
@@ -287,12 +322,15 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
             next = withStatus(next, 'archived', deps.now())
           }
           // Restart un-archives: back to idle, and an armed schedule gets a
-          // fresh nextRunAt so the cron picks up from now.
+          // fresh nextRunAt so the cron/interval picks up from now.
           if (body.restart === true && next.status === 'archived') {
             next = withStatus(next, 'idle', deps.now())
-            const cron = next.schedule?.cron ?? ''
-            if (next.schedule?.enabled === true && isValidCron(cron)) {
-              next = withSchedule(next, { enabled: true, nextRunAt: nextRunAtMs(cron, deps.now()) }, deps.now())
+            if (next.schedule?.enabled === true && isSchedulable(next.schedule)) {
+              const armed = isIntervalRule(next.schedule)
+                ? deps.now() + next.schedule.intervalMinutes! * 60_000
+                : nextRunAtMs(next.schedule.cron, deps.now())
+              if (armed === undefined) return undefined
+              next = withSchedule(next, { enabled: true, nextRunAt: armed }, deps.now())
             }
           }
           // Skip-once: roll nextRunAt forward ONE occurrence so the next fire
@@ -300,9 +338,12 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
           // the displayed run; a stale (missed) nextRunAt skips the imminent
           // catch-up fire instead of landing on an already-past ghost.
           if (body.skipNext === true) {
-            const cron = next.schedule?.cron ?? ''
-            if (next.schedule?.enabled !== true || !isValidCron(cron)) return undefined
-            const skipped = nextRunAtMs(cron, Math.max(next.schedule.nextRunAt ?? deps.now(), deps.now()))
+            const schedule = next.schedule
+            if (schedule?.enabled !== true || !isSchedulable(schedule)) return undefined
+            const base = Math.max(schedule.nextRunAt ?? deps.now(), deps.now())
+            const skipped = isIntervalRule(schedule)
+              ? scheduleNextMs(schedule, base)
+              : nextRunAtMs(schedule.cron, base)
             if (skipped === undefined) return undefined
             next = withSchedule(next, { enabled: true, nextRunAt: skipped }, deps.now())
           }

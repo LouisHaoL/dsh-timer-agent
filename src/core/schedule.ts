@@ -62,6 +62,53 @@ export function isValidCron(expr: string): boolean {
 }
 
 /**
+ * Whether the rule runs on a fixed interval ("every N minutes from the last
+ * trigger") instead of a cron grid — cron cannot express e.g. every 302
+ * minutes, and manual runs need to re-anchor a live grid.
+ */
+export function isIntervalRule(
+  rule: { cron?: string; intervalMinutes?: number } | undefined | null,
+): boolean {
+  return rule !== null && rule !== undefined &&
+    typeof rule.intervalMinutes === 'number' && rule.intervalMinutes > 0
+}
+
+/** Whether an enabled rule can fire at all (needs a cron expression or an interval). */
+export function isSchedulable(rule: { cron?: string; intervalMinutes?: number } | undefined): boolean {
+  return rule !== undefined && ((rule.cron ?? '') !== '' || isIntervalRule(rule))
+}
+
+/** Next run for the rule: interval → `fromMs + N minutes`; cron → next grid match. */
+export function scheduleNextMs(
+  rule: { cron: string; intervalMinutes?: number },
+  fromMs: number,
+): number | undefined {
+  if (isIntervalRule(rule)) return fromMs + rule.intervalMinutes! * 60_000
+  return nextRunAtMs(rule.cron, fromMs)
+}
+
+/**
+ * Next fixed-interval instant anchored on the last trigger: `anchorMs` plus
+ * the smallest whole number of intervals landing strictly after `fromMs`.
+ * A missed stretch (host down, job paused, long run) stacks whole intervals
+ * forward instead of re-anchoring at the current time, so the grid never
+ * drifts with restarts; without an anchor the first slot is `fromMs + N`.
+ */
+export function intervalNextMs(
+  anchorMs: number | undefined,
+  intervalMinutes: number,
+  fromMs: number,
+): number {
+  const step = intervalMinutes * 60_000
+  let next = (anchorMs ?? fromMs) + step
+  if (next <= fromMs) next += Math.ceil((fromMs - next) / step) * step
+  // fromMs landing exactly on a grid point gets one more step: the slot is
+  // strictly after it (the ported original returned fromMs itself there).
+  if (next <= fromMs) next += step
+  return next
+}
+
+/**
  * Compute the next matching instant after `fromMs` (ms epoch), in local
  * time, at minute granularity, strictly greater than `fromMs`.
  */
