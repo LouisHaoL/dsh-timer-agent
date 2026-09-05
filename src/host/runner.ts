@@ -1,9 +1,12 @@
 /**
  * Host runner: the hermes-cron-shaped engine.
  *
- * - `tick()` (60s interval, the dsh web host process's lifetime): due jobs
- *   fire, schedule rolled forward BEFORE execution (at-most-once), skipped
- *   when the job is already running.
+ * - `tick()` (60s interval, the dsh web host process's lifetime): execution
+ *   is driven ENTIRELY by the persisted `nextRunAt` (cron/interval only
+ *   compute it). Due recurring jobs roll `nextRunAt` forward BEFORE the run
+ *   is accepted (at-most-once, with a race guard against hand-pinned
+ *   instants); due one-shot jobs consume `nextRunAt` inside requestRun's
+ *   atomic mutate. All fires are skipped while the job is already running.
  * - Execution: pinned sessionId → `agents.resume` (context continuity);
  *   otherwise `agents.create` in the target workdir (default workspace when
  *   blank) — a fresh session per run, attached to the workspace record so
@@ -20,7 +23,7 @@ import type {
 } from './contracts.ts'
 import { isTurnEndEvent, turnErrorDetail } from './contracts.ts'
 import type { HostJobStore } from './store.ts'
-import { isIntervalRule, isSchedulable, nextRunAtMs, scheduleNextMs } from '../core/schedule.ts'
+import { isIntervalRule, isOneShotRule, isSchedulable, nextRunAtMs, scheduleNextMs } from '../core/schedule.ts'
 import { appendCapped, splitCommandArgs, truncateOutputTail } from '../core/command.ts'
 import {
   settleExecution, startExecution, withSchedule, jobKind,
@@ -188,7 +191,9 @@ export class TimerRunner {
 
   /**
    * One scheduler pass: fire due schedules, then manual run requests.
-   * (at-most-once: `nextRunAt` rolls forward before the run is accepted.)
+   * Recurring jobs roll `nextRunAt` forward before the run is accepted
+   * (at-most-once); one-shot jobs consume it inside requestRun's atomic
+   * mutate instead (see {@link requestRun}).
    */
   async tick(): Promise<number> {
     if (this.disposed) return 0
@@ -196,31 +201,56 @@ export class TimerRunner {
     const jobs = await this.store.load()
     let fired = 0
     for (const job of jobs) {
-      // 1. due schedule (archived jobs never fire; cron or fixed interval)
+      // 1. due schedule (archived jobs never fire; cron, interval, or one-shot)
       const schedule = job.schedule
       if (job.status !== 'archived'
         && schedule !== undefined && schedule.enabled && isSchedulable(schedule)
         && schedule.nextRunAt !== undefined && schedule.nextRunAt <= this.now()) {
         const firedAt = schedule.nextRunAt
-        // Interval grids advance from the just-fired instant; cron follows
-        // its own grid (max(firedAt, nextRunAt) base keeps a skipped-running
-        // occurrence from rolling the grid backwards).
-        const next = isIntervalRule(schedule)
-          ? scheduleNextMs(schedule, firedAt)
-          : nextRunAtMs(schedule.cron, firedAt)
-        if (await this.requestRun(job.id)) {
-          fired += 1
-          await this.store.mutate(current => {
-            const row = current.find(candidate => candidate.id === job.id)
-            if (row === undefined || row.schedule === undefined) return undefined
-            return {
-              jobs: current.map(candidate =>
-                candidate.id === job.id
-                  ? withSchedule(candidate, { nextRunAt: next, lastTriggeredAt: this.now() }, this.now())
-                  : candidate),
-              result: true,
-            }
-          })
+        if (isOneShotRule(schedule)) {
+          // One-shot: there is no "next" instant to compute — the fire IS the
+          // consumption. requestRun clears nextRunAt in its atomic mutate, so
+          // a skipped (already running) fire leaves the shot armed and the
+          // next tick retries — same skip-while-running semantics as recurring.
+          if (await this.requestRun(job.id)) fired += 1
+        } else {
+          // Interval grids advance from the just-fired instant; cron follows
+          // its own grid (max(firedAt, nextRunAt) base keeps a skipped-running
+          // occurrence from rolling the grid backwards).
+          const next = isIntervalRule(schedule)
+            ? scheduleNextMs(schedule, firedAt)
+            : nextRunAtMs(schedule.cron, firedAt)
+          if (await this.requestRun(job.id)) {
+            fired += 1
+            await this.store.mutate(current => {
+              const row = current.find(candidate => candidate.id === job.id)
+              if (row === undefined || row.schedule === undefined) return undefined
+              // Race guard: the user may have hand-pinned nextRunAt between
+              // the snapshot above and this mutate — only roll the grid when
+              // the row still carries a pipeline-owned instant, i.e. the one
+              // that fired, or the interval re-anchor requestRun just wrote
+              // (identifiable as `latest execution startedAt + N`, immune to
+              // real-clock drift between the two mutates). Anything else is a
+              // user pin: keep it, stamp only the trigger.
+              const schedule = row.schedule
+              const lastStartedAt = row.executions[row.executions.length - 1]?.startedAt
+              const reanchored = isIntervalRule(schedule)
+                && schedule.nextRunAt !== undefined && lastStartedAt !== undefined
+                && schedule.nextRunAt === lastStartedAt + schedule.intervalMinutes! * 60_000
+              const rolled = schedule.nextRunAt === firedAt || reanchored
+              return {
+                jobs: current.map(candidate =>
+                  candidate.id === job.id
+                    ? withSchedule(
+                        candidate,
+                        { ...(rolled ? { nextRunAt: next } : {}), lastTriggeredAt: this.now() },
+                        this.now(),
+                      )
+                    : candidate),
+                result: true,
+              }
+            })
+          }
         }
       }
       // 2. manual run request (from the tool or the web UI)
@@ -258,6 +288,13 @@ export class TimerRunner {
       if (kind === 'agent' && extraPrompt !== undefined && extraPrompt.trim() !== '') {
         execution.error = undefined
         next.prompt = `${next.prompt}\n\n## Run Context\n${extraPrompt}`.trim()
+      }
+      // One-shot consumption, in the SAME atomic mutate that opens the run
+      // (at-most-once): scheduled fires, manual runs, success, and failure all
+      // spend the single shot (settleExecution archives the job afterwards),
+      // while a rejected run (already running) leaves it armed for a retry.
+      if (next.schedule !== undefined && isOneShotRule(next.schedule) && next.schedule.nextRunAt !== undefined) {
+        next = withSchedule(next, { nextRunAt: undefined, lastTriggeredAt: this.now() }, this.now())
       }
       // A manual run counts as the last execution: an armed interval grid
       // re-anchors on it (下次 = 手动时刻 + N). Scheduled fires re-roll the

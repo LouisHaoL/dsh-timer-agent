@@ -53,11 +53,31 @@ Run settlement rides `session/event` (`turn/end`'s `reason.kind`); failure reaso
 ## Features
 
 - **Scheduling**: 5-field cron (min hour day month weekday; `*`, `*/n`, `a-b`, comma lists) + preset dropdown (daily 09:00 / hourly / every 10 min / Mondays 09:00) on both create and edit surfaces
+- **Three schedule modes**: a dropdown on the create form — Cron / fixed interval / one-time (right after the schedule toggle, disabled while unchecked); fixed-interval grids stack whole periods from the last trigger and never drift across restarts
+- **One-shot jobs**: a single run instant (defaults to now + 1h) that fires once and auto-archives — success, failure, and a manual "run now" all consume the shot; ideal for finish-and-forget scripts and reminders
+- **Editable next run**: interval and one-shot jobs allow hand-editing the next run instant; cron stays strictly expression-driven (server-refused)
+- **Pause / resume semantics**: pausing keeps the stored next run; resuming recomputes from the REAL last execution and skips missed occurrences straight to the next future slot
 - **Target tree picker**: collapsible per-project groups, each with a "new session" leaf plus the project's existing sessions (most recent first); picking a session pins that conversation
 - **Jobs board**: list (title/status/next-run/run count), search, detail view (cron editor, execution history, jump to session transcript, run now, reset, delete)
 - **Model tool**: `timer_agent` in any conversation creates and manages the same jobs
 - **System-prompt injection**: the host half registers a `plugin:timer-agent` announcement section so agents know the capability
 - **Safety**: API routes are loopback + same-origin only (same fence as dsh-ssh)
+
+## v0.5.0 changes & backward compatibility
+
+**Changes**
+
+- The execution model now depends **entirely on the persisted next-run instant** (`nextRunAt`): cron / interval only compute it; a due instant fires
+- New **one-shot jobs** (`runAt` on create / `run_at` on the `timer_agent` tool): one fire, then the job archives; a manual run consumes the shot too
+- **Pausing no longer clears** the next-run instant; **resuming** recomputes from the real last execution (`executions` last `startedAt`, falling back to `lastTriggeredAt`) without replaying missed runs
+- Interval / one-shot next-run instants are hand-editable (PATCH `nextRunAt` / tool `next_run_at`); cron refuses manual instants by design
+- Skip-once is meaningless for a one-shot (skipping == not running): the UI hides it and the server refuses
+
+**Backward compatibility**
+
+- **No ledger migration needed — upgrade in place**: cron / fixed-interval / paused rows from v0.4.0 and earlier survive untouched; blank legacy rows are still dropped (as before) and a corrupted ledger still degrades instead of crashing
+- Old code paths could never write a one-shot-shaped row (blank cron AND no interval WITH an instant), so no pre-existing job can be misclassified as one-shot and auto-archived
+- Only caveat: after upgrading, **rolling back** to v0.4.0 makes the old validator drop one-shot schedules (those jobs become unscheduled); cron / interval jobs are unaffected
 
 ## Install
 

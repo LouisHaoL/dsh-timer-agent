@@ -9,7 +9,7 @@
  */
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import { randomUUID } from 'node:crypto'
-import { isIntervalRule, isSchedulable, isValidCron, nextRunAtMs, scheduleNextMs } from '../core/schedule.ts'
+import { isIntervalRule, isOneShotRule, isSchedulable, isValidCron, nextRunAtMs, resumeNextMs, scheduleNextMs } from '../core/schedule.ts'
 import {
   createJob, jobKind, normalizeTimeoutMs, withSchedule, withStatus, withRunRequest,
   type JobRecord,
@@ -30,6 +30,31 @@ export interface TimerToolDeps {
   store: HostJobStore
   runner: TimerRunner
   now(): number
+}
+
+/**
+ * The REAL last-execution instant a resume re-anchors on (same semantics as
+ * the routes layer): the latest execution's startedAt, falling back to the
+ * schedule's lastTriggeredAt for rows that never ran.
+ */
+function lastExecutionMs(job: JobRecord): number | undefined {
+  return job.executions.length > 0
+    ? job.executions[job.executions.length - 1].startedAt
+    : job.schedule?.lastTriggeredAt ?? undefined
+}
+
+/**
+ * Parse a run_at / next_run_at argument into ms: an ISO datetime string, a
+ * bare ms-epoch digit string, or (defensively) a number; undefined = invalid.
+ */
+function readInstantArg(value: string | number | undefined): number | undefined {
+  if (value === undefined) return undefined
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value > 0 ? Math.round(value) : undefined
+  }
+  const text = value.trim()
+  const parsed = /^\d+$/.test(text) ? Number(text) : Date.parse(text)
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : undefined
 }
 
 /** One job row summarized for the model (compact, no execution history dump). */
@@ -57,10 +82,12 @@ function summarize(job: JobRecord): JsonValue {
   // `undefined` property value fails the host's lossless-JSON tool-output
   // validation (JSON.stringify would silently drop it, the validator does not).
   if (job.schedule?.enabled === true) {
-    // Fixed-interval mode: interval_minutes replaces cron as the schedulable field.
+    // Fixed-interval mode: interval_minutes replaces cron as the schedulable
+    // field; a one-shot (no cron, no interval) reports only its next_run_at —
+    // that instant is its entire schedule.
     const schedule: Record<string, JsonValue> = isIntervalRule(job.schedule)
       ? { interval_minutes: job.schedule.intervalMinutes! }
-      : { cron: job.schedule.cron }
+      : job.schedule.cron !== '' ? { cron: job.schedule.cron } : {}
     if (job.schedule.nextRunAt !== undefined) schedule.next_run_at = new Date(job.schedule.nextRunAt).toISOString()
     result.schedule = schedule
   }
@@ -91,7 +118,8 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
       "Two job kinds: kind='agent' (default) fires a real agent session from a self-contained prompt; kind='command' (普通任务) directly spawns command+args with no AI — use it for scripts that just need a timer.",
       "action='create' schedules a new job (requires schedule; agent jobs also require prompt — self-contained, scheduled runs get no current-chat context unless session is pinned; command jobs require command instead).",
       "action='list' shows all jobs; action='update' edits prompt/schedule/name/command/args; action='pause'/'resume' arms/disarms the schedule; action='archive' freezes a job (no schedule fires, no manual runs) and action='restart' un-archives it back to idle; action='remove' deletes; action='run' fires immediately in the background (returns at once).",
-      "schedule syntax: 5-field cron like '0 9 * * *' (min hour day month weekday), OR pass interval_minutes instead for a fixed interval from the last trigger (e.g. every 302 minutes — a cadence a cron grid cannot express).",
+      "schedule syntax: 5-field cron like '0 9 * * *' (min hour day month weekday), OR pass interval_minutes instead for a fixed interval from the last trigger (e.g. every 302 minutes — a cadence a cron grid cannot express), OR pass run_at alone for a ONE-SHOT job that fires once at that instant and archives afterwards (a manual run spends the shot too).",
+      "pausing keeps the stored next run time; resuming recomputes it from the last real execution, so runs missed while paused are not replayed.",
       "session targeting (agent jobs only): leave both workdir and session empty → each run starts a NEW conversation in the default workspace; pass session=<existing session id> → every run continues that conversation (continuity); pass workdir=<absolute project path> → new sessions run inside that project. For command jobs, workdir is the process cwd.",
       "preset (agent jobs with new sessions only): the agent-preset id new sessions are composed from (its tools/prompt sections/skills); empty = the deployment default. Ignored when session is pinned.",
       'Scheduled runs execute autonomously with no user present — prompts must not ask questions.',
@@ -129,6 +157,14 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
       interval_minutes: {
         type: 'number',
         description: 'For create/update: fixed-interval alternative to schedule — fire every N minutes measured from the last trigger (> 0 switches to interval mode, clearing cron; 0 or negative switches back to cron mode). Use for cadences cron cannot express, e.g. every 302 minutes.',
+      },
+      run_at: {
+        type: 'string',
+        description: "For create: fire ONCE at this instant — an ISO datetime like '2026-09-05T09:00' (a ms epoch also works, as a number or digit string) — creating a one-shot job that archives after the run. Only used when neither schedule nor interval_minutes is given.",
+      },
+      next_run_at: {
+        type: 'string',
+        description: "For update: move the next run to this instant — ISO datetime (or ms epoch as number/digit string). Allowed for interval and one-shot jobs; rejected for cron jobs (edit the cron expression instead).",
       },
       name: {
         type: 'string',
@@ -178,6 +214,8 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
       args?: string
       schedule?: string
       interval_minutes?: number
+      run_at?: string | number
+      next_run_at?: string | number
       name?: string
       workdir?: string
       session?: string
@@ -197,10 +235,17 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
         const intervalMinutes = typeof args.interval_minutes === 'number' && args.interval_minutes > 0
           ? Math.round(args.interval_minutes)
           : undefined
+        // One-shot instant (ISO or ms epoch): only used when neither cron nor
+        // interval is given (precedence interval > cron > run_at, no error).
+        const runAt = intervalMinutes === undefined && cron === '' ? readInstantArg(args.run_at) : undefined
+        if (intervalMinutes === undefined && cron === ''
+          && args.run_at !== undefined && runAt === undefined) {
+          return { kind: 'create', error: 'invalid run_at (expected an ISO datetime or ms epoch)' }
+        }
         const prompt = (args.prompt ?? '').trim()
         const kind = args.kind === 'command' ? 'command' : 'agent'
         const command = (args.command ?? '').trim()
-        if (cron === '' && intervalMinutes === undefined) return { kind: 'create', error: 'schedule (cron) or interval_minutes is required for create' }
+        if (cron === '' && intervalMinutes === undefined && runAt === undefined) return { kind: 'create', error: 'schedule (cron), interval_minutes, or run_at is required for create' }
         if (cron !== '' && !isValidCron(cron)) return { kind: 'create', error: `invalid cron expression: ${cron}` }
         if (kind === 'command') {
           if (command === '') return { kind: 'create', error: "command is required for create with kind='command'" }
@@ -221,7 +266,9 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
         const withTimeout = timeoutMs === undefined ? job : { ...job, timeoutMs }
         const scheduled = intervalMinutes !== undefined
           ? withSchedule(withTimeout, { enabled: true, intervalMinutes, nextRunAt: now() + intervalMinutes * 60_000 }, now())
-          : withSchedule(withTimeout, { enabled: true, cron, nextRunAt: nextRunAtMs(cron, now()) }, now())
+          : cron !== ''
+            ? withSchedule(withTimeout, { enabled: true, cron, nextRunAt: nextRunAtMs(cron, now()) }, now())
+            : withSchedule(withTimeout, { enabled: true, cron: '', nextRunAt: runAt! }, now())
         await deps.store.mutate(jobs => ({ jobs: [...jobs, scheduled], result: true }))
         return { kind: 'create', job: summarize(scheduled) }
       }
@@ -254,12 +301,13 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
           const job = jobs.find(candidate => candidate.id === id)
           if (job === undefined || job.schedule === undefined) return undefined
           if (enabled && !isSchedulable(job.schedule)) return undefined
-          const nextRunAt = enabled
-            ? (isIntervalRule(job.schedule)
-              ? now() + job.schedule.intervalMinutes! * 60_000
-              : nextRunAtMs(job.schedule.cron, now()))
-            : undefined
-          const next = withSchedule(job, { enabled, nextRunAt }, now())
+          // Pause keeps the persisted nextRunAt (a pending one-shot survives
+          // the pause). Resume recomputes from the REAL last execution —
+          // missed slots are not replayed; a one-shot's own instant passes
+          // through even when past (the resume deliberately fires it).
+          const next = enabled
+            ? withSchedule(job, { enabled: true, nextRunAt: resumeNextMs(job.schedule, lastExecutionMs(job), now()) }, now())
+            : withSchedule(job, { enabled: false }, now())
           return { jobs: jobs.map(candidate => (candidate.id === id ? next : candidate)), result: next }
         })
         if (updated === undefined) return { kind: action, error: `job ${id} not found or has no usable schedule` }
@@ -329,6 +377,15 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
               ...(wasEnabled ? { enabled: true, nextRunAt: nextRunAtMs(cron, now()) } : {}),
             }, now())
           }
+          // Hand-pinned next run: interval and one-shot modes accept it (the
+          // persisted instant IS their execution basis); a cron grid or a
+          // schedule-less job refuses — edit the expression instead.
+          if (args.next_run_at !== undefined) {
+            const pinned = readInstantArg(args.next_run_at)
+            if (pinned === undefined || next.schedule === undefined
+              || (next.schedule.cron ?? '') !== '') return undefined
+            next = withSchedule(next, { nextRunAt: pinned }, now())
+          }
           if (next.title === job.title && next.prompt === job.prompt && next.target === job.target && next.schedule === job.schedule) {
             // nothing changed; still accept (idempotent)
           }
@@ -362,11 +419,14 @@ export function registerTimerTool(tools: { register(def: unknown): () => void },
           }
           if (job.status !== 'archived') return undefined
           let next = withStatus(job, 'idle', now())
-          if (next.schedule?.enabled === true && isSchedulable(next.schedule)) {
-            const armed = isIntervalRule(next.schedule)
-              ? now() + next.schedule.intervalMinutes! * 60_000
-              : nextRunAtMs(next.schedule.cron, now())
-            next = withSchedule(next, { enabled: true, nextRunAt: armed }, now())
+          // Recurring schedules re-arm from the real last execution (missed
+          // slots skipped); a one-shot stays as-is — its instant was consumed
+          // by the run that archived it, there is nothing to re-arm.
+          if (next.schedule?.enabled === true && isSchedulable(next.schedule) && !isOneShotRule(next.schedule)) {
+            const armed = resumeNextMs(next.schedule, lastExecutionMs(next), now())
+            if (armed !== undefined) {
+              next = withSchedule(next, { enabled: true, nextRunAt: armed }, now())
+            }
           }
           return { jobs: jobs.map(candidate => (candidate.id === id ? next : candidate)), result: next }
         })

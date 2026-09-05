@@ -11,6 +11,11 @@
  *      (succeeded & failed), manual runRequest fast path
  *   4. timer_agent tool actions against a fake registry
  *   5. HTTP route handlers: CRUD + run + loopback fence + bad input
+ *   plus: command jobs (普通任务), fixed-interval mode, and the one-shot
+ *   model — consumption (scheduled + manual), auto-archive on success AND
+ *   failure, skip-while-running non-consumption, the tick race guard on a
+ *   hand-pinned nextRunAt, pause-keeps/resume-reanchors, and nextRunAt /
+ *   runAt pinning across routes and the tool
  */
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -1002,6 +1007,373 @@ section('timer_agent tool: interval_minutes create / update / resume')
   const resumed = (await s.load())[0]
   check('resume re-arms the interval from now', resumed?.schedule?.enabled === true
     && resumed?.schedule?.nextRunAt === now + 60 * INTERVAL_MIN)
+
+  disposer()
+}
+
+// ============================================================================
+// 9. one-shot jobs (execution rides the persisted nextRunAt)
+// ============================================================================
+section('TimerRunner: one-shot fires once, consumes nextRunAt, archives')
+{
+  const host = makeFakeHost()
+  const s = new HostJobStore(join(tempDir, 'runner-oneshot.json'))
+  let now = Date.UTC(2026, 0, 1, 0, 0, 0)
+  const runner = new TimerRunner({ ctx: host.ctx, store: s, now: () => now })
+  runner.start()
+  runner.stop()
+
+  let job = createJob({ title: 'once', description: '', prompt: 'one time only', target: { workdir: '', sessionId: '' } }, now, 'job-once')
+  job = withSchedule(job, { enabled: true, cron: '', nextRunAt: now - 1 }, now)
+  await s.mutate(jobs => ({ jobs: [...jobs, job], result: true }))
+
+  const fired = await runner.tick()
+  await new Promise(r => setTimeout(r, 25))
+  check('one-shot fired once', fired === 1 && host.calls.filter(c => c.kind === 'create').length === 1)
+  const armed = (await s.load())[0]
+  check('nextRunAt consumed atomically at fire time', armed?.schedule?.nextRunAt === undefined
+    && armed?.schedule?.lastTriggeredAt === now, JSON.stringify(armed?.schedule))
+  check('no grid rolled (a one-shot has none)', armed?.status === 'running')
+
+  // Settle succeeded → archived, not done.
+  const created = host.calls.find(c => c.kind === 'create')
+  const agent = host.agentOf(created!.sessionId!)
+  const messageId = (agent as unknown as { lastMessageId?: string }).lastMessageId
+  host.emit(created!.sessionId!, 'user/message', { id: messageId })
+  host.emit(created!.sessionId!, 'turn/end', { turn: 1, reason: { kind: 'stop' } })
+  await new Promise(r => setTimeout(r, 25))
+  const settled = (await s.load())[0]
+  check('succeeded one-shot settles archived', settled?.status === 'archived'
+    && settled?.executions[0]?.result === 'succeeded', `${settled?.status}`)
+  check('consumed one-shot never re-fires', await runner.tick() === 0)
+}
+
+section('TimerRunner: failed one-shot archives + skip-while-running does not consume')
+{
+  const host = makeFakeHost()
+  const s = new HostJobStore(join(tempDir, 'runner-oneshot2.json'))
+  let now = Date.UTC(2026, 0, 1, 0, 0, 0)
+  const runner = new TimerRunner({ ctx: host.ctx, store: s, now: () => now })
+  runner.start()
+  runner.stop()
+
+  // A RUNNING job with a due one-shot: the fire is skipped AND the shot stays
+  // armed — the next tick retries (same skip-while-running as recurring).
+  let busy = createJob({ title: 'busy-once', description: '', prompt: 'x', target: { workdir: '', sessionId: '' } }, now, 'job-once-busy')
+  busy = withSchedule({ ...busy, status: 'running' }, { enabled: true, cron: '', nextRunAt: now - 1 }, now)
+  await s.mutate(jobs => ({ jobs: [...jobs, busy], result: true }))
+  const skipped = await runner.tick()
+  const busyRow = (await s.load()).find(j => j.id === 'job-once-busy')
+  check('skip-while-running leaves a due one-shot armed', skipped === 0
+    && busyRow?.schedule?.nextRunAt === now - 1, `${busyRow?.schedule?.nextRunAt}`)
+
+  // A due one-shot whose run FAILS still archives (the shot is consumed).
+  let bad = createJob({ title: 'bad-once', description: '', prompt: 'boom', target: { workdir: '', sessionId: '' } }, now, 'job-once-bad')
+  bad = withSchedule(bad, { enabled: true, cron: '', nextRunAt: now - 1 }, now)
+  await s.mutate(jobs => ({ jobs: [...jobs, bad], result: true }))
+  await runner.tick()
+  await new Promise(r => setTimeout(r, 25))
+  const fired = host.calls.find(c => c.kind === 'followup' && c.prompt === 'boom')
+  const agent = host.agentOf(fired!.sessionId!)
+  const messageId = (agent as unknown as { lastMessageId?: string }).lastMessageId
+  host.emit(fired!.sessionId!, 'user/message', { id: messageId })
+  host.emit(fired!.sessionId!, 'turn/end', { turn: 1, reason: { kind: 'error', error: { message: 'boom' } } })
+  await new Promise(r => setTimeout(r, 25))
+  const failedRow = (await s.load()).find(j => j.id === 'job-once-bad')
+  check('failed one-shot settles archived too', failedRow?.status === 'archived'
+    && failedRow?.executions[0]?.result === 'failed', `${failedRow?.status}`)
+}
+
+section('TimerRunner: a manual run consumes a one-shot')
+{
+  const host = makeFakeHost()
+  const s = new HostJobStore(join(tempDir, 'runner-oneshot3.json'))
+  let now = Date.UTC(2026, 0, 1, 0, 0, 0)
+  const runner = new TimerRunner({ ctx: host.ctx, store: s, now: () => now })
+  runner.start()
+  runner.stop()
+
+  let job = createJob({ title: 'manual-once', description: '', prompt: 'later', target: { workdir: '', sessionId: '' } }, now, 'job-once-manual')
+  job = withSchedule(job, { enabled: true, cron: '', nextRunAt: now + 60 * 60_000 }, now)
+  await s.mutate(jobs => ({ jobs: [...jobs, job], result: true }))
+
+  const accepted = await runner.requestRun('job-once-manual')
+  await new Promise(r => setTimeout(r, 25))
+  const row = (await s.load())[0]
+  check('manual run accepted and spent the pending shot', accepted === true
+    && row?.schedule?.nextRunAt === undefined && row?.schedule?.lastTriggeredAt === now,
+  `${accepted}/${JSON.stringify(row?.schedule)}`)
+
+  // The spent shot cannot fire on schedule afterwards.
+  now += 2 * 60 * 60_000
+  check('a consumed one-shot never fires on schedule', await runner.tick() === 0)
+
+  // The manual run settles → archived like any consumed one-shot.
+  const created = host.calls.find(c => c.kind === 'create')
+  const agent = host.agentOf(created!.sessionId!)
+  const messageId = (agent as unknown as { lastMessageId?: string }).lastMessageId
+  host.emit(created!.sessionId!, 'user/message', { id: messageId })
+  host.emit(created!.sessionId!, 'turn/end', { turn: 1, reason: { kind: 'stop' } })
+  await new Promise(r => setTimeout(r, 25))
+  check('manual-run one-shot archives after settling', (await s.load())[0]?.status === 'archived')
+}
+
+section('TimerRunner: tick race guard keeps a hand-pinned nextRunAt')
+{
+  const host = makeFakeHost()
+  const s = new HostJobStore(join(tempDir, 'runner-race.json'))
+  let now = Date.UTC(2026, 0, 1, 0, 0, 0)
+  const runner = new TimerRunner({ ctx: host.ctx, store: s, now: () => now })
+  runner.start()
+  runner.stop()
+
+  let job = createJob({ title: 'racy', description: '', prompt: 'p', target: { workdir: '', sessionId: '' } }, now, 'job-race')
+  job = withSchedule(job, { enabled: true, cron: '0 * * * *', nextRunAt: now - 1 }, now)
+  await s.mutate(jobs => ({ jobs: [...jobs, job], result: true }))
+
+  // Simulate the user hand-pinning nextRunAt between tick's snapshot and the
+  // roll mutate: every mutate's fresh view of the ledger carries the pinned
+  // instant instead of the one that fired.
+  type StoreMutate = (fn: (jobs: JobRecord[]) => { jobs: JobRecord[]; result: unknown } | undefined) => Promise<unknown>
+  const originalMutate: StoreMutate = s.mutate.bind(s)
+  const pinned = now + 5 * 60_000
+  ;(s as unknown as { mutate: StoreMutate }).mutate = fn =>
+    originalMutate(current => fn(current.map(candidate =>
+      candidate.id === 'job-race' && candidate.schedule !== undefined
+        ? { ...candidate, schedule: { ...candidate.schedule, nextRunAt: pinned } }
+        : candidate)))
+  const fired = await runner.tick()
+  ;(s as unknown as { mutate: StoreMutate }).mutate = originalMutate
+  await new Promise(r => setTimeout(r, 25))
+  const row = (await s.load())[0]
+  check('the fire still went through (the guard skips the roll, not the run)', fired === 1
+    && host.calls.some(c => c.kind === 'create'))
+  check('the roll did not clobber the hand-pinned instant', row?.schedule?.nextRunAt === pinned,
+    `${row?.schedule?.nextRunAt} vs ${pinned}`)
+  check('the fire still stamped lastTriggeredAt', row?.schedule?.lastTriggeredAt === now)
+}
+
+// ============================================================================
+// 10. routes: pause keeps nextRunAt / resume re-anchors on the real last
+//     execution / nextRunAt pinning / one-shot create (runAt)
+// ============================================================================
+section('HTTP routes: pause keeps nextRunAt, resume re-anchors on the real last execution')
+{
+  const host = makeFakeHost()
+  const s = new HostJobStore(join(tempDir, 'routes-resume.json'))
+  let now = Date.UTC(2026, 0, 1, 0, 0, 0)
+  const runner = new TimerRunner({ ctx: host.ctx, store: s, now: () => now })
+  const routes = makeRoutes({ store: s, runner, ctx: host.ctx, now: () => now })
+  const jobsRoute = routes.find(r => r.path.endsWith('/jobs'))!
+
+  const { Readable, Writable } = await import('node:stream')
+  function makeReq(method: string, url: string, body?: unknown): NodeIncomingMessage {
+    const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]) as unknown as NodeIncomingMessage
+    Object.assign(req, { method, url, headers: { host: '127.0.0.1:3080' }, socket: { remoteAddress: '127.0.0.1' } })
+    return req
+  }
+  function makeRes(): { res: NodeServerResponse; status: number; body: string } {
+    const state = { status: 0, body: '' }
+    const res = new Writable({ write(chunk, _enc, cb) { state.body += chunk.toString(); cb() } }) as unknown as NodeServerResponse
+    Object.assign(res, { writeHead: (status: number) => { state.status = status }, end: (chunk?: string | Buffer) => { if (chunk !== undefined) state.body += chunk.toString() } })
+    return { res, get status() { return state.status }, get body() { return state.body } }
+  }
+
+  // --- interval: a real execution anchors the resume grid ---
+  const now0 = now
+  const created = makeRes()
+  await jobsRoute.handler(makeReq('POST', '/api/dsh-timer-agent/jobs', {
+    title: 'resume-int', prompt: 'p', intervalMinutes: 30, target: { workdir: '', sessionId: '' },
+  }), created.res)
+  const intId = (JSON.parse(created.body).job as JobRecord).id
+  // A real execution at now0 (the manual run re-anchored the grid too).
+  check('interval job running with a real execution', await runner.requestRun(intId) === true)
+
+  const paused = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${intId}`, { scheduleEnabled: false }), paused.res)
+  const pausedJob = JSON.parse(paused.body).job as JobRecord
+  check('pause keeps the persisted nextRunAt', paused.status === 200
+    && pausedJob.schedule?.enabled === false
+    && pausedJob.schedule?.nextRunAt === now0 + 30 * INTERVAL_MIN,
+  `${pausedJob.schedule?.nextRunAt}`)
+
+  now = now0 + 110 * INTERVAL_MIN // a long paused gap, well past one slot
+  const resumed = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${intId}`, { scheduleEnabled: true }), resumed.res)
+  const resumedJob = JSON.parse(resumed.body).job as JobRecord
+  check('interval resume anchors on the real last execution (no replay)',
+    resumed.status === 200 && resumedJob.schedule?.enabled === true
+    && resumedJob.schedule?.nextRunAt === now0 + 120 * INTERVAL_MIN,
+  `${resumedJob.schedule?.nextRunAt}`)
+
+  // --- cron: a slot missed while paused is skipped, next is after NOW ---
+  now = Date.UTC(2026, 0, 2, 10, 0, 0)
+  const today9 = new Date(2026, 0, 2, 9, 0, 0).getTime()
+  const tomorrow9 = new Date(2026, 0, 3, 9, 0, 0).getTime()
+  let cronJob = createJob({ title: 'resume-cron', description: '', prompt: 'p', target: { workdir: '', sessionId: '' } }, now, 'job-resume-cron')
+  cronJob = withSchedule(cronJob, {
+    enabled: true, cron: '0 9 * * *', nextRunAt: today9, lastTriggeredAt: today9 - 24 * 60 * 60_000,
+  }, now)
+  await s.mutate(jobs => ({ jobs: [...jobs, cronJob], result: true }))
+  await jobsRoute.handler(makeReq('PATCH', '/api/dsh-timer-agent/jobs?id=job-resume-cron', { scheduleEnabled: false }), makeRes().res)
+  const cronPaused = (await s.load()).find(j => j.id === 'job-resume-cron')
+  check('cron pause keeps the (now stale) nextRunAt', cronPaused?.schedule?.enabled === false
+    && cronPaused?.schedule?.nextRunAt === today9)
+  const cronResumed = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', '/api/dsh-timer-agent/jobs?id=job-resume-cron', { scheduleEnabled: true }), cronResumed.res)
+  const cronResumedJob = JSON.parse(cronResumed.body).job as JobRecord
+  check('cron resume skips the missed slot, takes the next after now',
+    cronResumed.status === 200 && cronResumedJob.schedule?.nextRunAt === tomorrow9,
+  `${cronResumedJob.schedule?.nextRunAt}`)
+}
+
+section('HTTP routes: one-shot create (runAt) / nextRunAt pinning / one-shot skip+restart')
+{
+  const host = makeFakeHost()
+  const s = new HostJobStore(join(tempDir, 'routes-oneshot.json'))
+  let now = Date.UTC(2026, 0, 1, 0, 0, 0)
+  const runner = new TimerRunner({ ctx: host.ctx, store: s, now: () => now })
+  const routes = makeRoutes({ store: s, runner, ctx: host.ctx, now: () => now })
+  const jobsRoute = routes.find(r => r.path.endsWith('/jobs'))!
+
+  const { Readable, Writable } = await import('node:stream')
+  function makeReq(method: string, url: string, body?: unknown): NodeIncomingMessage {
+    const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]) as unknown as NodeIncomingMessage
+    Object.assign(req, { method, url, headers: { host: '127.0.0.1:3080' }, socket: { remoteAddress: '127.0.0.1' } })
+    return req
+  }
+  function makeRes(): { res: NodeServerResponse; status: number; body: string } {
+    const state = { status: 0, body: '' }
+    const res = new Writable({ write(chunk, _enc, cb) { state.body += chunk.toString(); cb() } }) as unknown as NodeServerResponse
+    Object.assign(res, { writeHead: (status: number) => { state.status = status }, end: (chunk?: string | Buffer) => { if (chunk !== undefined) state.body += chunk.toString() } })
+    return { res, get status() { return state.status }, get body() { return state.body } }
+  }
+
+  // POST runAt (ISO string) → one-shot: armed, blank cron, nextRunAt = runAt.
+  const onceIso = makeRes()
+  await jobsRoute.handler(makeReq('POST', '/api/dsh-timer-agent/jobs', {
+    title: 'once-route', prompt: 'p', runAt: new Date(now + 60_000).toISOString(),
+  }), onceIso.res)
+  const onceJob = JSON.parse(onceIso.body).job as JobRecord
+  check('POST runAt (ISO) → 201 one-shot schedule', onceIso.status === 201
+    && onceJob.schedule?.enabled === true && onceJob.schedule?.cron === ''
+    && onceJob.schedule?.nextRunAt === now + 60_000)
+  // POST runAt (ms epoch number) parses too.
+  const onceMs = makeRes()
+  await jobsRoute.handler(makeReq('POST', '/api/dsh-timer-agent/jobs', { title: 'once-ms', runAt: now + 120_000 }), onceMs.res)
+  check('POST runAt (ms epoch) parses', onceMs.status === 201
+    && (JSON.parse(onceMs.body).job as JobRecord).schedule?.nextRunAt === now + 120_000)
+  // interval > runAt precedence: runAt silently ignored.
+  const precedence = makeRes()
+  await jobsRoute.handler(makeReq('POST', '/api/dsh-timer-agent/jobs', {
+    title: 'once-ignored', intervalMinutes: 10, runAt: now + 999_000,
+  }), precedence.res)
+  const precedenceJob = JSON.parse(precedence.body).job as JobRecord
+  check('POST intervalMinutes + runAt → runAt ignored', precedence.status === 201
+    && precedenceJob.schedule?.intervalMinutes === 10
+    && precedenceJob.schedule?.nextRunAt === now + 10 * INTERVAL_MIN)
+  // Invalid runAt → 400; no schedule field at all stays unscheduled.
+  const badRunAt = makeRes()
+  await jobsRoute.handler(makeReq('POST', '/api/dsh-timer-agent/jobs', { title: 'once-bad', runAt: 'garbage' }), badRunAt.res)
+  check('POST invalid runAt → 400', badRunAt.status === 400, `${badRunAt.status}`)
+  const bare = makeRes()
+  await jobsRoute.handler(makeReq('POST', '/api/dsh-timer-agent/jobs', { title: 'no-schedule' }), bare.res)
+  check('POST without cron/interval/runAt stays unscheduled', bare.status === 201
+    && (JSON.parse(bare.body).job as JobRecord).schedule === undefined)
+
+  // PATCH nextRunAt: one-shot accepts (ISO + number), cron refuses, no
+  // schedule refuses.
+  const pinned = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${onceJob.id}`, { nextRunAt: now + 3_600_000 }), pinned.res)
+  check('PATCH nextRunAt pins a one-shot', pinned.status === 200
+    && (JSON.parse(pinned.body).job as JobRecord).schedule?.nextRunAt === now + 3_600_000)
+  const pinnedIso = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${onceJob.id}`, {
+    nextRunAt: new Date(now + 7_200_000).toISOString(),
+  }), pinnedIso.res)
+  check('PATCH nextRunAt (ISO) pins a one-shot', pinnedIso.status === 200
+    && (JSON.parse(pinnedIso.body).job as JobRecord).schedule?.nextRunAt === now + 7_200_000)
+
+  let cronRow = createJob({ title: 'pin-cron', description: '', prompt: 'p', target: { workdir: '', sessionId: '' } }, now, 'job-pin-cron')
+  cronRow = withSchedule(cronRow, { enabled: true, cron: '0 9 * * *', nextRunAt: now + 60_000 }, now)
+  await s.mutate(jobs => ({ jobs: [...jobs, cronRow], result: true }))
+  const pinnedCron = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', '/api/dsh-timer-agent/jobs?id=job-pin-cron', { nextRunAt: now + 999_000 }), pinnedCron.res)
+  check('PATCH nextRunAt on a cron job → 400', pinnedCron.status === 400, `${pinnedCron.status}`)
+
+  const bareId = (JSON.parse(bare.body).job as JobRecord).id
+  const pinnedBare = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${bareId}`, { nextRunAt: now + 999_000 }), pinnedBare.res)
+  check('PATCH nextRunAt without a schedule → 400', pinnedBare.status === 400, `${pinnedBare.status}`)
+
+  // skipNext on a one-shot → 400 (nothing to skip without spending the shot).
+  const skipOnce = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', `/api/dsh-timer-agent/jobs?id=${onceJob.id}`, { skipNext: true }), skipOnce.res)
+  check('PATCH skipNext on a one-shot → 400', skipOnce.status === 400, `${skipOnce.status}`)
+
+  // restart on a consumed one-shot: back to idle, schedule stays as-is.
+  let spent = createJob({ title: 'spent-once', description: '', prompt: 'p', target: { workdir: '', sessionId: '' } }, now, 'job-once-spent')
+  spent = withSchedule({ ...spent, status: 'archived' }, { enabled: true, cron: '', nextRunAt: undefined, lastTriggeredAt: now - 1_000 }, now)
+  await s.mutate(jobs => ({ jobs: [...jobs, spent], result: true }))
+  const restarted = makeRes()
+  await jobsRoute.handler(makeReq('PATCH', '/api/dsh-timer-agent/jobs?id=job-once-spent', { restart: true }), restarted.res)
+  const restartedJob = JSON.parse(restarted.body).job as JobRecord
+  check('restart of a consumed one-shot → idle, no re-arm', restarted.status === 200
+    && restartedJob.status === 'idle' && restartedJob.schedule?.enabled === false
+    && restartedJob.schedule?.nextRunAt === undefined,
+  `${restarted.status}/${restartedJob.schedule?.nextRunAt}`)
+}
+
+// ============================================================================
+// 11. timer_agent tool: run_at one-shot create / next_run_at pin / pause-resume
+// ============================================================================
+section('timer_agent tool: run_at create, next_run_at pin, pause/resume keep')
+{
+  const host = makeFakeHost()
+  const s = new HostJobStore(join(tempDir, 'tool-oneshot.json'))
+  let now = Date.UTC(2026, 0, 1, 0, 0, 0)
+  const runner = new TimerRunner({ ctx: host.ctx, store: s, now: () => now })
+  const registered: unknown[] = []
+  const disposer = registerTimerTool({ register: (def: unknown) => { registered.push(def); return () => {} } }, { store: s, runner, now: () => now })
+  const tool = registered[0] as { execute(args: Record<string, unknown>): Promise<Record<string, unknown>> }
+
+  const created = await tool.execute({
+    action: 'create', name: 'once-tool', prompt: 'p', run_at: new Date(now + 60_000).toISOString(),
+  }) as { job?: { schedule?: { cron?: string; next_run_at?: string } } }
+  check('tool create with run_at summarizes a one-shot (no empty cron)',
+    created.job?.schedule?.cron === undefined
+    && created.job?.schedule?.next_run_at === new Date(now + 60_000).toISOString(),
+  JSON.stringify(created.job?.schedule))
+  const onceRow = (await s.load())[0]
+  check('tool one-shot row: enabled, blank cron, nextRunAt', onceRow?.schedule?.enabled === true
+    && onceRow?.schedule?.cron === '' && onceRow?.schedule?.nextRunAt === now + 60_000)
+  const badRunAt = await tool.execute({ action: 'create', prompt: 'p', run_at: 'garbage' }) as { error?: string }
+  check('tool create with invalid run_at rejected', typeof badRunAt.error === 'string')
+  const noSchedule = await tool.execute({ action: 'create', prompt: 'p' }) as { error?: string }
+  check('tool create without cron/interval/run_at rejected', typeof noSchedule.error === 'string')
+
+  // next_run_at pin: one-shot accepts (ms epoch digit string parses too),
+  // cron job refuses.
+  const onceId = onceRow!.id
+  await tool.execute({ action: 'update', job_id: onceId, next_run_at: String(now + 120_000) })
+  check('tool update next_run_at pins a one-shot', (await s.load()).find(j => j.id === onceId)?.schedule?.nextRunAt === now + 120_000)
+  await tool.execute({ action: 'create', name: 'cron-tool', prompt: 'p', schedule: '0 9 * * *' })
+  const cronId = (await s.load()).find(j => j.schedule?.cron === '0 9 * * *')!.id
+  const refused = await tool.execute({ action: 'update', job_id: cronId, next_run_at: String(now + 999_000) }) as { error?: string }
+  check('tool update next_run_at on a cron job rejected', typeof refused.error === 'string'
+    && (await s.load()).find(j => j.id === cronId)?.schedule?.nextRunAt === nextRunAtMs('0 9 * * *', now))
+
+  // pause keeps the instant; resume passes a one-shot's own instant through —
+  // even when past (the pending shot fires on the next tick).
+  await tool.execute({ action: 'update', job_id: onceId, next_run_at: String(now - 5_000) })
+  await tool.execute({ action: 'pause', job_id: onceId })
+  const pausedRow = (await s.load()).find(j => j.id === onceId)
+  check('tool pause keeps nextRunAt', pausedRow?.schedule?.enabled === false
+    && pausedRow?.schedule?.nextRunAt === now - 5_000)
+  await tool.execute({ action: 'resume', job_id: onceId })
+  const resumedRow = (await s.load()).find(j => j.id === onceId)
+  check('tool resume passes the one-shot instant through (even past)',
+    resumedRow?.schedule?.enabled === true && resumedRow?.schedule?.nextRunAt === now - 5_000)
 
   disposer()
 }

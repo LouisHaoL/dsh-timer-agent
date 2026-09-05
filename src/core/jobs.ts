@@ -8,9 +8,11 @@
  * or fall back to "new session in the default workspace" when both targeting
  * fields are blank (the task-board execution default).
  *
- * Framework-free (no cordis, no runtime imports) so the state machine is
- * unit-testable in isolation.
+ * Framework-free (no cordis) and pure — its only import is the sibling pure
+ * schedule module — so the state machine is unit-testable in isolation.
  */
+
+import { isOneShotRule } from './schedule.ts'
 
 /**
  * Job lifecycle status. 'archived' freezes the job: the ticker skips its
@@ -60,11 +62,18 @@ export interface ExecutionRecord {
  * A scheduled-run rule attached to a job. The browser-side scheduler ticks
  * every minute and triggers the job when `nextRunAt` is due; the rule is
  * persisted with the job (localStorage), so scheduling survives refreshes.
+ *
+ * Execution fully depends on the persisted `nextRunAt`; `cron` /
+ * `intervalMinutes` only feed the recomputation of that instant. When both
+ * are blank the rule is a ONE-SHOT (see {@link isOneShotRule}): `nextRunAt`
+ * is its sole scheduling basis, it fires exactly once, and the job archives
+ * when that execution settles — success, failure, and a consumed manual run
+ * alike.
  */
 export interface ScheduleRule {
   /** Whether the schedule is armed. */
   enabled: boolean
-  /** 5-field cron expression: `分 时 日 月 周`. */
+  /** 5-field cron expression: `分 时 日 月 周`. Blank on interval/one-shot rules. */
   cron: string
   /**
    * Fixed-interval mode (minutes, measured from the last trigger). When set
@@ -205,6 +214,12 @@ export interface NewJobInput {
   preset?: JobPreset
   /** Model override for runs (absent → default resolution). */
   modelSelection?: JobModelSelection
+  /**
+   * One-shot jobs: first (only) execution instant (ms epoch). Meaningful only
+   * when no cron / interval is given — that shape arms a {@link ScheduleRule}
+   * whose sole scheduling basis is this instant (see {@link isOneShotRule}).
+   */
+  runAt?: number
 }
 
 /** Statuses the runner may settle a card into from 'running'. */
@@ -322,8 +337,12 @@ export function startExecution(
 
 /**
  * Settle a running execution: record the outcome and move the job into the
- * matching column. No-op when the execution is not the job's latest or is
- * already settled.
+ * matching column. A ONE-SHOT job (schedule present, no cron / interval —
+ * see {@link isOneShotRule}) archives instead: it has fired its single
+ * `nextRunAt`, so success, failure, and a consumed manual run all land in
+ * 'archived' rather than 'done'/'failed'. 'cancelled' keeps the regular
+ * flow (back to idle) — a cancelled run has not consumed the one shot.
+ * No-op when the execution is not the job's latest or is already settled.
  */
 export function settleExecution(
   job: JobRecord,
@@ -347,9 +366,12 @@ export function settleExecution(
   }
   const executions = [...job.executions]
   executions[index] = settled
-  const status: JobStatus = outcome === 'succeeded' ? 'done'
-    : outcome === 'failed' ? 'failed'
-      : job.status === 'running' ? 'idle' : job.status
+  const oneShotConsumed = outcome !== 'cancelled' &&
+    job.schedule !== undefined && isOneShotRule(job.schedule)
+  const status: JobStatus = oneShotConsumed ? 'archived'
+    : outcome === 'succeeded' ? 'done'
+      : outcome === 'failed' ? 'failed'
+        : job.status === 'running' ? 'idle' : job.status
   return { ...job, status, updatedAt: now, executions }
 }
 

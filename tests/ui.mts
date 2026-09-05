@@ -107,6 +107,22 @@ section('locales: job-kind keys resolve in zh + en')
 }
 
 // ============================================================================
+// 2b-late. locale completeness for the one-shot (一次性) surface
+// ============================================================================
+section('locales: one-shot keys resolve in zh + en')
+{
+  const onceKeys = [
+    'detail.schedule.modeOnce', 'detail.schedule.editNextRun',
+    'new.schedule.runAt', 'new.schedule.runAt.invalid',
+  ] as const
+  check('every one-shot key exists in zh', onceKeys.every(key => typeof zh[key] === 'string'))
+  check('every one-shot key exists in en', onceKeys.every(key => typeof en[key] === 'string'))
+  check('one-shot labels render',
+    t('detail.schedule.modeOnce') === '一次性' && t('detail.schedule.editNextRun') === '修改下次执行时间')
+  check('one-shot runAt error renders', t('new.schedule.runAt.invalid') === '请选择一次性任务的执行时间')
+}
+
+// ============================================================================
 // 2c. command-job createJob shape + controller POST body
 // ============================================================================
 section('command jobs: model shape + controller POST body')
@@ -145,6 +161,49 @@ section('command jobs: model shape + controller POST body')
     const body = posts[0]
     check('controller POST body carries command fields', body?.kind === 'command'
       && body?.command === 'pwsh' && body?.args === '-v', JSON.stringify(body))
+    controller.dispose()
+  } finally {
+    globalThis.fetch = original
+  }
+}
+
+// ============================================================================
+// 2d. one-shot jobs: runAt on create + nextRunAt on update (controller body)
+// ============================================================================
+section('one-shot jobs: controller runAt/nextRunAt forwarding')
+{
+  const bodies: Array<{ method: string; url: string; body: Record<string, unknown> }> = []
+  const original = globalThis.fetch
+  globalThis.fetch = (((url: string | URL, init?: { method?: string, body?: string }) => {
+    const href = String(url)
+    const method = init?.method ?? 'GET'
+    if (method !== 'GET' && init?.body !== undefined) {
+      bodies.push({ method, url: href, body: JSON.parse(init.body) as Record<string, unknown> })
+    }
+    const text = JSON.stringify(method === 'GET' && href === '/api/dsh-timer-agent/jobs' ? { jobs: [] } : { job: {} })
+    return Promise.resolve({ status: 200, headers: new Map(), ok: true, json: async () => JSON.parse(text) } as unknown as Response)
+  })) as typeof fetch
+  try {
+    const sessions = {
+      list: { getSnapshot: () => ({ current: undefined }), subscribe: () => () => {} },
+      open: () => {},
+    }
+    const controller = new RemoteBoardController(sessions as unknown as never)
+    // One-shot create: runAt present, no cron / interval staged.
+    await controller.createJob({
+      title: 'once', description: '', prompt: '',
+      target: { workdir: '', sessionId: '' },
+      runAt: 1_800_000_000_000,
+    })
+    // Hand-edited next run (interval / one-shot PATCH; cron is host-refused).
+    await controller.updateJob('id-x', { nextRunAt: 1_900_000_000_000 })
+    const create = bodies.find(call => call.method === 'POST')
+    const patch = bodies.find(call => call.method === 'PATCH' && call.url.includes('/api/dsh-timer-agent/jobs?id='))
+    check('one-shot create body carries runAt with no cron/interval',
+      create?.body.runAt === 1_800_000_000_000
+        && create?.body.cron === undefined && create?.body.intervalMinutes === undefined,
+      JSON.stringify(create))
+    check('updateJob body carries nextRunAt', patch?.body.nextRunAt === 1_900_000_000_000, JSON.stringify(patch))
     controller.dispose()
   } finally {
     globalThis.fetch = original

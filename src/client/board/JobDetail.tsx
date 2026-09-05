@@ -10,7 +10,7 @@
  * its own while editing.
  */
 import { useEffect, useMemo, useState } from 'react'
-import { isIntervalRule, isSchedulable, isValidCron, nextRunAtMs, scheduleNextMs } from '../../core/schedule.ts'
+import { isIntervalRule, isOneShotRule, isSchedulable, isValidCron, nextRunAtMs, scheduleNextMs } from '../../core/schedule.ts'
 import { commandLine, jobKind, timeoutLabel, type ExecutionRecord, type JobRecord, type ScheduleRule } from '../../core/jobs.ts'
 import type { ModelOptions, PresetOptions, TargetGroup } from '../target-options.ts'
 import type { BoardControllerFace } from '../controller-face.ts'
@@ -92,6 +92,12 @@ function intervalLabel(minutes: number): string {
 /** Read-mode label for a schedule rule: the cron expression or a prettified interval. */
 function scheduleLabel(schedule: ScheduleRule | undefined): string {
   if (schedule === undefined) return t('detail.schedule.notScheduled')
+  // One-shot: the persisted nextRunAt is the whole schedule — show it inline.
+  if (isOneShotRule(schedule)) {
+    return schedule.nextRunAt !== undefined
+      ? `${t('detail.schedule.modeOnce')} · ${new Date(schedule.nextRunAt).toLocaleString()}`
+      : t('detail.schedule.modeOnce')
+  }
   return isIntervalRule(schedule) ? intervalLabel(schedule.intervalMinutes!) : schedule.cron
 }
 
@@ -200,6 +206,9 @@ export function JobDetail({ controller, job, targetOptions, modelOptions, preset
   const [presetOptionsState, setPresetOptionsState] = useState<PresetOptions>({ presets: [] })
   const [presetDraft, setPresetDraft] = useState(current.preset ?? '')
   const [error, setError] = useState<string | undefined>(undefined)
+  // Standalone next-run edit (read mode): interval/one-shot jobs only, saved
+  // straight through PATCH nextRunAt — the unified editor owns cron/interval.
+  const [nextRunDraft, setNextRunDraft] = useState('')
 
   /** All leaves across groups, for resolving the current selection. */
   const leafMap = useMemo(() => {
@@ -341,6 +350,15 @@ export function JobDetail({ controller, job, targetOptions, modelOptions, preset
     })
   }
 
+  /** Persist a hand-edited next run (interval / one-shot only; cron is fixed). */
+  const saveNextRun = (): void => {
+    const ms = new Date(nextRunDraft).getTime()
+    if (!Number.isFinite(ms)) return
+    void Promise.resolve(controller.updateJob(current.id, { nextRunAt: ms })).then(() => {
+      setNextRunDraft('')
+    }).catch(() => undefined)
+  }
+
   // Read-only schedule labels.
   const enabled = current.schedule?.enabled ?? false
   const nextRunAt = current.schedule?.nextRunAt
@@ -363,12 +381,19 @@ export function JobDetail({ controller, job, targetOptions, modelOptions, preset
       : draftCronValid ? nextRunAtMs(cronDraft.trim(), Date.now()) : undefined
   // Skip-once preview: where 下次运行 lands if the next fire is skipped
   // (same max(nextRunAt, now) base the host uses; re-render keeps it fresh).
+  // Meaningless for a one-shot (the shot IS nextRunAt) — hidden there.
   const liveSchedule = current.schedule
-  const skipTarget = enabled && nextRunAt !== undefined && liveSchedule !== undefined && isSchedulable(liveSchedule)
+  const oneShot = liveSchedule !== undefined && isOneShotRule(liveSchedule)
+  const skipTarget = enabled && nextRunAt !== undefined && liveSchedule !== undefined
+    && isSchedulable(liveSchedule) && !oneShot
     ? isIntervalRule(liveSchedule)
       ? scheduleNextMs(liveSchedule, Math.max(nextRunAt, Date.now()))
       : nextRunAtMs(liveSchedule.cron, Math.max(nextRunAt, Date.now()))
     : undefined
+  // Next-run edit: interval and one-shot rules only (cron is server-refused);
+  // save stays disabled until the datetime-local draft parses.
+  const nextRunDraftValid = nextRunDraft !== '' && Number.isFinite(new Date(nextRunDraft).getTime())
+  const canEditNextRun = canEdit && enabled && (isIntervalRule(liveSchedule) || oneShot)
 
   return (
     <div className={css.modalBackdrop} onMouseDown={event => { if (event.target === event.currentTarget) controller.closeJob() }}>
@@ -660,6 +685,28 @@ export function JobDetail({ controller, job, targetOptions, modelOptions, preset
                     </button>
                   )}
                 </p>
+                {canEditNextRun && (
+                  <>
+                    <span className={css.fieldHint}>{t('detail.schedule.editNextRun')}</span>
+                    <div className={css.scheduleRow}>
+                      <input
+                        className={css.input}
+                        type="datetime-local"
+                        value={nextRunDraft}
+                        aria-label={t('detail.schedule.nextRun')}
+                        onChange={event => { setNextRunDraft(event.target.value) }}
+                      />
+                      <button
+                        type="button"
+                        className={css.ghostButton}
+                        disabled={!nextRunDraftValid}
+                        onClick={saveNextRun}
+                      >
+                        {t('detail.save')}
+                      </button>
+                    </div>
+                  </>
+                )}
               </>
             )}
           </section>

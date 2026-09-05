@@ -116,6 +116,8 @@ export class RemoteBoardController {
       ...input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection },
       ...(schedule?.cron !== undefined ? { cron: schedule.cron } : {}),
       ...(schedule?.intervalMinutes !== undefined ? { intervalMinutes: schedule.intervalMinutes } : {}),
+      // One-shot: no cron / interval staged, a runAt arms the host's nextRunAt.
+      ...(input.runAt !== undefined ? { runAt: input.runAt } : {}),
       ...(input.kind === 'command'
         ? { kind: 'command', command: input.command ?? '', args: input.args ?? '' }
         : {}),
@@ -135,7 +137,7 @@ export class RemoteBoardController {
     this.pendingCreateSchedule = schedule
   }
 
-  async updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt' | 'command' | 'args' | 'preset'>> & { target?: SessionTarget; cron?: string; intervalMinutes?: number; scheduleEnabled?: boolean; timeoutMinutes?: number; modelSelection?: JobModelSelection | null }): Promise<void> {
+  async updateJob(id: string, patch: Partial<Pick<JobRecord, 'title' | 'description' | 'prompt' | 'command' | 'args' | 'preset'>> & { target?: SessionTarget; cron?: string; intervalMinutes?: number; nextRunAt?: number; scheduleEnabled?: boolean; timeoutMinutes?: number; modelSelection?: JobModelSelection | null }): Promise<void> {
     const body: Record<string, unknown> = { ...patch }
     if (patch.timeoutMinutes !== undefined) body.timeoutMinutes = patch.timeoutMinutes
     // modelSelection: object pins a model, null clears it (host deletes the

@@ -5,8 +5,10 @@
  * agent sessions, so LAN-exposed dsh web deployments must not serve them).
  *
  * - GET    /api/dsh-timer-agent/jobs          → the full ledger
- * - POST   /api/dsh-timer-agent/jobs          → create a job
- * - PATCH  /api/dsh-timer-agent/jobs?id=…     → update fields / arm cron
+ * - POST   /api/dsh-timer-agent/jobs          → create a job (cron / interval /
+ *                                              one-shot via runAt)
+ * - PATCH  /api/dsh-timer-agent/jobs?id=…     → update fields / arm cron /
+ *                                              pin nextRunAt (non-cron modes)
  * - DELETE /api/dsh-timer-agent/jobs?id=…     → remove
  * - POST   /api/dsh-timer-agent/jobs/run?id=… → fire now (background)
  * - GET    /api/dsh-timer-agent/workspaces    → host workspace registry {id,path}
@@ -19,7 +21,10 @@ import { randomUUID } from 'node:crypto'
 import type {
   HostPluginContext, HostRoute, NodeIncomingMessage, NodeServerResponse,
 } from './contracts.ts'
-import { intervalNextMs, isIntervalRule, isSchedulable, isValidCron, nextRunAtMs, scheduleNextMs } from '../core/schedule.ts'
+import {
+  intervalNextMs, isIntervalRule, isOneShotRule, isSchedulable, isValidCron,
+  nextRunAtMs, resumeNextMs, scheduleNextMs,
+} from '../core/schedule.ts'
 import { createJob, normalizeTimeoutMs, withSchedule, withStatus, type JobModelSelection, type JobRecord } from '../core/jobs.ts'
 import type { HostJobStore } from './store.ts'
 import type { TimerRunner } from './runner.ts'
@@ -109,6 +114,32 @@ function reanchorMs(schedule: NonNullable<JobRecord['schedule']>, now: number): 
     : scheduleNextMs(schedule, now)
 }
 
+/**
+ * The REAL last-execution instant a resume/restart re-anchors on: the latest
+ * execution's startedAt (a manual run counts — it re-anchored the grid too),
+ * falling back to the schedule's lastTriggeredAt for rows that never ran.
+ */
+function lastExecutionMs(job: JobRecord): number | undefined {
+  return job.executions.length > 0
+    ? job.executions[job.executions.length - 1].startedAt
+    : job.schedule?.lastTriggeredAt ?? undefined
+}
+
+/**
+ * Parse a body instant (ms epoch number, or ISO datetime string) into a
+ * finite positive ms epoch; undefined when absent or unparseable.
+ */
+function readInstantMs(value: unknown): number | undefined {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value > 0 ? Math.round(value) : undefined
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Date.parse(value.trim())
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+  }
+  return undefined
+}
+
 /** Dependencies the routes close over. */
 export interface RouteDeps {
   store: HostJobStore
@@ -157,6 +188,15 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
         const intervalMinutes = typeof body.intervalMinutes === 'number' && body.intervalMinutes > 0
           ? Math.round(body.intervalMinutes)
           : undefined
+        // One-shot alternative: a single runAt instant (ms epoch or ISO) when
+        // neither cron nor interval is given. With cron/interval present it is
+        // ignored (precedence interval > cron > runAt, no error).
+        const runAt = intervalMinutes === undefined && !armCron ? readInstantMs(body.runAt) : undefined
+        if (intervalMinutes === undefined && !armCron
+          && body.runAt !== undefined && runAt === undefined) {
+          writeJson(res, 400, { error: 'invalid runAt (expected a ms epoch number or ISO datetime string)' })
+          return
+        }
         const kind = body.kind === 'command' ? 'command' : 'agent'
         const command = typeof body.command === 'string' ? body.command.trim() : ''
         const args = typeof body.args === 'string' ? body.args : ''
@@ -197,6 +237,10 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
           )
         } else if (armCron) {
           job = withSchedule(job, { enabled: true, cron, nextRunAt: nextRunAtMs(cron, deps.now()) }, deps.now())
+        } else if (runAt !== undefined) {
+          // One-shot: no recurrence expression — the persisted instant is the
+          // whole schedule, consumed by its single execution.
+          job = withSchedule(job, { enabled: true, cron: '', nextRunAt: runAt }, deps.now())
         }
         await deps.store.mutate(jobs => ({ jobs: [...jobs, job], result: true }))
         writeJson(res, 201, { job })
@@ -303,17 +347,32 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
               next = withSchedule(next, { enabled: true, nextRunAt: nextRunAtMs(cron, deps.now()) }, deps.now())
             }
           }
+          // Hand-pinned next run (interval and one-shot modes — the persisted
+          // instant IS their execution basis). A cron grid refuses: its instants
+          // belong to the expression, edit that instead. A job without a
+          // schedule refuses too (nothing for the instant to attach to).
+          if (body.nextRunAt !== undefined) {
+            const pinned = readInstantMs(body.nextRunAt)
+            if (pinned === undefined || next.schedule === undefined
+              || (next.schedule.cron ?? '') !== '') return undefined
+            next = withSchedule(next, { nextRunAt: pinned }, deps.now())
+          }
           if (body.scheduleEnabled === true) {
             const schedule = next.schedule
             if (schedule === undefined || !isSchedulable(schedule)) return undefined
-            const armed = isIntervalRule(schedule)
-              ? deps.now() + schedule.intervalMinutes! * 60_000
-              : nextRunAtMs(schedule.cron, deps.now())
+            // Resume re-anchors on the REAL last execution, skipping missed
+            // slots (no catch-up replay). A one-shot passes its persisted
+            // instant through even when past — resuming deliberately fires
+            // the pending shot on the next tick.
+            const armed = resumeNextMs(schedule, lastExecutionMs(next), deps.now())
             if (armed === undefined) return undefined
             next = withSchedule(next, { enabled: true, nextRunAt: armed }, deps.now())
           }
+          // Pause keeps the persisted nextRunAt: the pending instant (a
+          // one-shot's whole schedule in particular) survives the pause and
+          // re-arms unchanged on resume.
           if (body.scheduleEnabled === false) {
-            next = withSchedule(next, { enabled: false, nextRunAt: undefined }, deps.now())
+            next = withSchedule(next, { enabled: false }, deps.now())
           }
           if (body.resetStatus === true) next = withStatus(next, 'idle', deps.now())
           // Archive freezes the job (no schedule fires, no manual runs); a
@@ -321,14 +380,15 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
           if (body.archived === true && next.status !== 'running') {
             next = withStatus(next, 'archived', deps.now())
           }
-          // Restart un-archives: back to idle, and an armed schedule gets a
-          // fresh nextRunAt so the cron/interval picks up from now.
+          // Restart un-archives: back to idle; a recurring schedule re-arms
+          // from the real last execution (missed slots skipped). A one-shot
+          // restart has nothing to re-arm — its instant was consumed by the
+          // run that archived it — so the schedule stays exactly as it is.
           if (body.restart === true && next.status === 'archived') {
             next = withStatus(next, 'idle', deps.now())
-            if (next.schedule?.enabled === true && isSchedulable(next.schedule)) {
-              const armed = isIntervalRule(next.schedule)
-                ? deps.now() + next.schedule.intervalMinutes! * 60_000
-                : nextRunAtMs(next.schedule.cron, deps.now())
+            const schedule = next.schedule
+            if (schedule?.enabled === true && isSchedulable(schedule) && !isOneShotRule(schedule)) {
+              const armed = resumeNextMs(schedule, lastExecutionMs(next), deps.now())
               if (armed === undefined) return undefined
               next = withSchedule(next, { enabled: true, nextRunAt: armed }, deps.now())
             }
@@ -340,6 +400,9 @@ export function makeRoutes(deps: RouteDeps): HostRoute[] {
           if (body.skipNext === true) {
             const schedule = next.schedule
             if (schedule?.enabled !== true || !isSchedulable(schedule)) return undefined
+            // A one-shot has no "next occurrence" to skip — refusing (the UI
+            // hides the action) beats silently spending the only shot.
+            if (isOneShotRule(schedule)) return undefined
             const base = Math.max(schedule.nextRunAt ?? deps.now(), deps.now())
             const skipped = isIntervalRule(schedule)
               ? scheduleNextMs(schedule, base)

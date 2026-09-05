@@ -48,6 +48,12 @@ export function intervalDraftMinutes(value: string, unit: string): number | unde
   return count * unitMinutes
 }
 
+/** Local `datetime-local` input value for `date`, at minute precision. */
+export function localInputValue(date: Date): string {
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 /** Flatten a group into its selectable leaves: new-session first, sessions after. */
 export function leavesOf(group: TargetGroup): Leaf[] {
   return [
@@ -223,10 +229,13 @@ export function NewJobModal({ controller, targetOptions, modelOptions, presetOpt
   const [presetOptionsState, setPresetOptionsState] = useState<PresetOptions>({ presets: [] })
   const [presetId, setPresetId] = useState('')
   const [scheduleOn, setScheduleOn] = useState(false)
-  const [scheduleMode, setScheduleMode] = useState<'cron' | 'interval'>('cron')
+  const [scheduleMode, setScheduleMode] = useState<'cron' | 'interval' | 'once'>('cron')
   const [cron, setCron] = useState('0 9 * * *')
   const [intervalValue, setIntervalValue] = useState('')
   const [intervalUnit, setIntervalUnit] = useState<'1' | '60' | '1440'>('1')
+  // One-shot draft defaults to now + 1h (a sensible "soon but not immediate"
+  // instant the user nudges from, rather than an empty field to fill).
+  const [onceValue, setOnceValue] = useState(() => localInputValue(new Date(Date.now() + 60 * 60_000)))
   const [error, setError] = useState<string | undefined>(undefined)
 
   useEffect(() => {
@@ -277,8 +286,18 @@ export function NewJobModal({ controller, targetOptions, modelOptions, presetOpt
       setError(t('new.commandRequired'))
       return
     }
-    // Stage the schedule so createJob arms it server-side in one call.
-    controller.stageCreateSchedule?.(scheduleOn
+    // One-shot mode: the datetime-local draft becomes the run's ms epoch
+    // (sent as `runAt`; the host arms nextRunAt from it). Unparseable → block.
+    const onceRunAt = scheduleOn && scheduleMode === 'once'
+      ? new Date(onceValue).getTime()
+      : undefined
+    if (scheduleOn && scheduleMode === 'once' && !Number.isFinite(onceRunAt)) {
+      setError(t('new.schedule.runAt.invalid'))
+      return
+    }
+    // Stage the schedule so createJob arms it server-side in one call
+    // (one-shot carries no cron/interval — runAt below is the whole schedule).
+    controller.stageCreateSchedule?.(scheduleOn && scheduleMode !== 'once'
       ? scheduleMode === 'interval'
         ? (() => {
             const minutes = intervalDraftMinutes(intervalValue, intervalUnit)
@@ -295,6 +314,7 @@ export function NewJobModal({ controller, targetOptions, modelOptions, presetOpt
         command,
         args,
         target: { workdir: commandWorkdir.trim(), sessionId: '' },
+        ...(onceRunAt !== undefined ? { runAt: onceRunAt } : {}),
       })
       void Promise.resolve(created).then(job => {
         if (job === undefined) {
@@ -314,6 +334,7 @@ export function NewJobModal({ controller, targetOptions, modelOptions, presetOpt
       // A pinned session keeps its own preset; only new sessions carry one.
       ...(selected.sessionId === '' && presetId.trim() !== '' ? { preset: presetId.trim() } : {}),
       ...model === undefined ? {} : { modelSelection: { provider: model.provider, model: model.model } },
+      ...(onceRunAt !== undefined ? { runAt: onceRunAt } : {}),
     })
     void Promise.resolve(created).then(job => {
       if (job === undefined) {
@@ -467,37 +488,50 @@ export function NewJobModal({ controller, targetOptions, modelOptions, presetOpt
         )}
 
         <div className={css.field}>
-          <label className={css.scheduleToggle}>
-            <input
-              type="checkbox"
-              checked={scheduleOn}
-              onChange={event => { setScheduleOn(event.target.checked) }}
-            />
-            <span>{t('new.schedule.enable')}</span>
-          </label>
+          {/* Toggle + mode dropdown share one row: .field is a column flex,
+              so without this wrapper the select would drop to its own line.
+              Unchecked → the dropdown is disabled (visible, not selectable). */}
+          <div className={css.scheduleRow}>
+            <label className={css.scheduleToggle}>
+              <input
+                type="checkbox"
+                checked={scheduleOn}
+                onChange={event => { setScheduleOn(event.target.checked) }}
+              />
+              <span>{t('new.schedule.enable')}</span>
+            </label>
+            <select
+              className={css.input}
+              style={{ width: '160px' }}
+              value={scheduleMode}
+              disabled={!scheduleOn}
+              aria-label={t('new.schedule.mode')}
+              onChange={event => {
+                setScheduleMode(event.target.value as 'cron' | 'interval' | 'once')
+                setError(undefined)
+              }}
+            >
+              <option value="cron">{t('detail.schedule.cron')}</option>
+              <option value="interval">{t('detail.schedule.modeInterval')}</option>
+              <option value="once">{t('detail.schedule.modeOnce')}</option>
+            </select>
+          </div>
           {scheduleOn && (
             <>
-              <div className={css.kindToggle} role="radiogroup" aria-label={t('new.schedule')}>
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={scheduleMode === 'cron'}
-                  className={`${css.kindOption} ${scheduleMode === 'cron' ? css.kindOptionActive : ''}`}
-                  onClick={() => { setScheduleMode('cron'); setError(undefined) }}
-                >
-                  {t('detail.schedule.cron')}
-                </button>
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={scheduleMode === 'interval'}
-                  className={`${css.kindOption} ${scheduleMode === 'interval' ? css.kindOptionActive : ''}`}
-                  onClick={() => { setScheduleMode('interval'); setError(undefined) }}
-                >
-                  {t('detail.schedule.modeInterval')}
-                </button>
-              </div>
-              {scheduleMode === 'cron' ? (
+              {scheduleMode === 'once' ? (
+                <>
+                  <div className={css.scheduleRow}>
+                    <input
+                      className={css.input}
+                      type="datetime-local"
+                      value={onceValue}
+                      aria-label={t('new.schedule.runAt')}
+                      onChange={event => { setOnceValue(event.target.value); setError(undefined) }}
+                    />
+                  </div>
+                  <span className={css.fieldHint}>{t('detail.schedule.nextRun')}</span>
+                </>
+              ) : scheduleMode === 'cron' ? (
                 <div className={css.scheduleRow}>
                   <input
                     className={`${css.input} ${css.scheduleInput}`}

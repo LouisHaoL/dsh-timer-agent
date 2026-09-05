@@ -69,9 +69,13 @@ function normalizeStatus(status: unknown): JobStatus {
 }
 
 /**
- * Repair a persisted schedule rule: keep cron rules with a usable expression
- * and fixed-interval rules (intervalMinutes > 0, cron then ''); coerce
- * booleans; leave `nextRunAt`/`lastTriggeredAt` undefined when missing.
+ * Repair a persisted schedule rule: keep cron rules with a usable expression,
+ * fixed-interval rules (intervalMinutes > 0, cron then ''), and ONE-SHOT
+ * rules (blank cron, no interval, but scheduling evidence — a `nextRunAt`,
+ * or a `lastTriggeredAt` left by the consumption that cleared it). A blank
+ * rule with no evidence is a legacy no-schedule row and stays dropped (it
+ * must never start counting as a one-shot: settleExecution archives those).
+ * Coerces booleans; leaves missing instants undefined.
  */
 function normalizeSchedule(schedule: unknown): ScheduleRule | undefined {
   if (typeof schedule !== 'object' || schedule === null) return undefined
@@ -82,13 +86,21 @@ function normalizeSchedule(schedule: unknown): ScheduleRule | undefined {
   const intervalMinutes = typeof rule.intervalMinutes === 'number' && rule.intervalMinutes > 0
     ? Math.round(rule.intervalMinutes)
     : undefined
-  if (!isIntervalRule({ intervalMinutes }) && (rule.cron.trim() === '' || !isValidCron(rule.cron))) return undefined
+  const nextRunAt = typeof rule.nextRunAt === 'number' ? rule.nextRunAt : undefined
+  const lastTriggeredAt = typeof rule.lastTriggeredAt === 'number' ? rule.lastTriggeredAt : undefined
+  if (intervalMinutes === undefined && rule.cron.trim() === '') {
+    // One-shot shape: needs positive evidence, never a bare blank rule.
+    if (nextRunAt === undefined && lastTriggeredAt === undefined) return undefined
+  } else if (!isIntervalRule({ intervalMinutes }) && (rule.cron.trim() === '' || !isValidCron(rule.cron))) {
+    return undefined
+  }
   return {
-    enabled: rule.enabled === true && (rule.cron.trim() !== '' || intervalMinutes !== undefined),
+    enabled: rule.enabled === true &&
+      (rule.cron.trim() !== '' || intervalMinutes !== undefined || nextRunAt !== undefined),
     cron: intervalMinutes !== undefined ? '' : rule.cron,
     ...(intervalMinutes !== undefined ? { intervalMinutes } : {}),
-    nextRunAt: typeof rule.nextRunAt === 'number' ? rule.nextRunAt : undefined,
-    lastTriggeredAt: typeof rule.lastTriggeredAt === 'number' ? rule.lastTriggeredAt : undefined,
+    nextRunAt,
+    lastTriggeredAt,
   }
 }
 
