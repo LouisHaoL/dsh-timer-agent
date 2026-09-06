@@ -134,6 +134,31 @@ E2E 覆盖:cron 解析与下次运行计算(本地时间语义)、台账原子�
 | cron_hint → notepad → script 组装 prompt | 自包含 prompt(无人在场,不可提问) |
 | turn/end reason.kind=error 结算 | 同款 session/event 结算 |
 
+## 兼容性、依赖与权限声明
+
+**兼容范围**（声明于 package.json）：
+
+- DSH：`0.1.1-rc.2`（`dsh.compatibility.dshReleases` 精确声明 `compatible`；其他版本未验证，视为 `unknown`）
+- Node.js：`>=22`（`engines.node`；仓库内测试依赖 Node 22+ 的 type-stripping 能力）
+- 系统：开发验证环境为 Windows 10/11；macOS/Linux 未验证
+
+**依赖**：
+
+- 运行时依赖仅 `schemastery`（配置 schema 校验），随包安装，无 install/postinstall/prepare 生命周期脚本
+- `@deepseek-ai/*` 与 `react` 均为 peerDependencies,由 dsh 宿主提供,插件不禁用、不替换、不重复安装任何官方组件
+- 不执行任何安装期构建、下载或远程安装;构建产物 `lib/` 直接随源码入库
+
+**权限披露**（源码静态扫描可见的四类信号，均为插件功能所需）：
+
+- **文件**：任务台账 `~/.dsh/timer-agent/jobs.json` 的原子读写（store）；不触碰 dsh 核心目录与其他 Profile 文件
+- **命令**：`command` 型任务通过 `spawn` 执行任务作者填写的命令（cwd 可指定 workdir，继承宿主 `process.env`）；`prompt` 型任务通过 dsh session API 执行，不直接起 shell
+- **网络**：仅 localhost —— web GUI 调用同源 `/api/dsh-timer-agent/*` 路由 + 宿主经 dsh client 调用本地 dsh 服务；不连任何外部服务
+- **凭据**：子进程继承宿主 `process.env`（dsh 凭据经环境变量传递给 CLI）；插件自身不读取、不记录、不持久化任何凭据或密钥
+
+**失败边界**：服务进程停止即不触发（错过即跳过）；台账损坏时降级为空表并备份原文件；运行中到点跳过本次；手动触发与 ticker 触发经同一 at-most-once 通道，不会重复执行。
+
+**源码版本锚**：v0.5.0 发布于 commit `88ce4c30f54a257143dd80262cf7044aff431372`。
+
 ## 已知限制
 
 - 定时执行依赖 `dsh web` 服务进程存活(服务停了自然不触发;重启后只跑已顺延到期的任务,错过即跳过)

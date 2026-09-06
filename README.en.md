@@ -112,6 +112,31 @@ The E2E suite covers: cron parsing and next-run computation (local-time semantic
 | cron_hint → notepad → script prompt assembly | self-contained prompt (no human present) |
 | turn/end reason.kind=error settlement | same-shape session/event settlement |
 
+## Compatibility, dependencies & permissions
+
+**Compatibility** (declared in package.json):
+
+- DSH: `0.1.1-rc.2` (exact `compatible` via `dsh.compatibility.dshReleases`; other releases unverified = `unknown`)
+- Node.js: `>=22` (`engines.node`; the repo's tests rely on Node 22+ type-stripping)
+- OS: verified on Windows 10/11; macOS/Linux unverified
+
+**Dependencies**:
+
+- Single runtime dependency `schemastery` (config schema validation), installed with the package; no install/postinstall/prepare lifecycle scripts
+- `@deepseek-ai/*` and `react` are peerDependencies provided by the dsh host; the plugin never disables, replaces, or re-installs official components
+- No install-time builds, downloads, or remote installs; the `lib/` build output is committed alongside the source
+
+**Permissions** (the four signals visible to static source scanning — all required by plugin features):
+
+- **Files**: atomic read/write of the jobs ledger `~/.dsh/timer-agent/jobs.json` (store); never touches dsh core directories or other profiles
+- **Commands**: `command`-kind jobs spawn the command the job author configured (optional workdir cwd, inherits host `process.env`); `prompt`-kind jobs execute through the dsh session API and never open a shell
+- **Network**: localhost only — the web GUI calls same-origin `/api/dsh-timer-agent/*` routes and the host talks to the local dsh service via the dsh client; no external services
+- **Credentials**: spawned children inherit host `process.env` (dsh credentials reach the CLI via env vars); the plugin itself never reads, logs, or persists credentials or secrets
+
+**Failure bounds**: a stopped service process fires nothing (missed means missed); a corrupted ledger degrades to an empty table with the original file backed up; a mid-run due slot skips; manual and ticker triggers share one at-most-once channel and never double-execute.
+
+**Source anchor**: v0.5.0 released at commit `88ce4c30f54a257143dd80262cf7044aff431372`.
+
 ## Known limits
 
 - Firing depends on the `dsh web` service process being alive (a stopped service fires nothing; after restart only already-rolled-forward due jobs run — missed means missed)
