@@ -7,7 +7,7 @@
  *
  * @module dsh-timer-agent/tools
  */
-import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import { randomUUID } from 'node:crypto'
 import { isIntervalRule, isOneShotRule, isSchedulable, isValidCron, nextRunAtMs, resumeNextMs, scheduleNextMs } from '../core/schedule.ts'
 import {
@@ -16,6 +16,7 @@ import {
 } from '../core/jobs.ts'
 import type { HostJobStore } from './store.ts'
 import type { TimerRunner } from './runner.ts'
+import type { JsonValue } from './contracts.ts'
 
 /** Tool output shape. */
 interface TimerToolOutput {

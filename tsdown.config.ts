@@ -39,7 +39,6 @@ export default defineConfig([
         '@deepseek-ai/cosmokit',
         '@deepseek-ai/schemastery',
         'schemastery',
-        '@deepseek-ai/dsh-settings',
         '@deepseek-ai/dsh-system-prompt',
         '@deepseek-ai/dsh-tools',
         '@deepseek-ai/dsh-scope',

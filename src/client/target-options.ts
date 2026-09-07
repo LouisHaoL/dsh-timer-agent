@@ -13,7 +13,15 @@
  * Each group carries its own "new session" leaf (workdir set, sessionId
  * blank); each session leaf pins that conversation (sessionId set).
  */
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+/**
+ * Minimal client-context face. Structural on purpose: dsh 0.1.2 no longer
+ * publishes `@deepseek-ai/dsh-client-runtime`, and every read below is a
+ * defensive cast anyway — the real shape is the ambient cordis augmentation
+ * at runtime.
+ */
+interface ClientContext {
+  readonly [key: string]: unknown
+}
 
 /** One pinned-session leaf. */
 export interface TargetSession {

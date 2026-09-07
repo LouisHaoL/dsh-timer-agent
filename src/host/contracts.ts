@@ -8,6 +8,21 @@
  * @module dsh-timer-agent/host-contracts
  */
 
+import type z from 'schemastery'
+
+/**
+ * Minimal JSON value face. dsh 0.1.2 stopped re-exporting `JsonValue` from
+ * `@deepseek-ai/dsh-tools`; keeping a structural copy avoids a dependency on
+ * the package that now owns it (`@deepseek-ai/dsh-util-values`).
+ */
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue }
+
 /** The live session a host agent drives; identity + log read. */
 export interface HostSession {
   /** The session id shared by the agent registry and session log. */
@@ -231,6 +246,39 @@ export interface HostWebServer {
   register(route: HostRoute): () => void
 }
 
+/** Hooks a consumer hands to {@link HostSettings.installSection} (subset). */
+export interface HostSettingsSectionHooks<T> {
+  /** Receive the active configuration source (attach, detach, and change). */
+  setSource(current: () => T): void
+  /** Re-judge anything derived from the source after a source change. */
+  onChange(): void
+}
+
+/**
+ * The `settings` service (subset of the host `SettingsProvider`): namespace
+ * registration for optional-settings consumers. Mirrors
+ * `SettingsProvider.installSection` as of dsh 0.1.2-rc.1 — the pre-0.1.2
+ * `installSettingsSection` helper export no longer exists.
+ */
+export interface HostSettings {
+  /**
+   * Register this plugin's composition entry as the namespace's base layer.
+   * @param owner - the consuming plugin's context (registration is an effect
+   *   on its fiber: unloading removes the namespace).
+   * @param ns - consumer-owned namespace (lowercase hyphenated identifier).
+   * @param schema - schemastery schema resolving the namespace.
+   * @param entry - composition entry used as the base and fallback value.
+   * @param hooks - source sink and change notification.
+   */
+  installSection<T>(
+    owner: object,
+    ns: string,
+    schema: z<T>,
+    entry: T,
+    hooks: HostSettingsSectionHooks<T>,
+  ): void
+}
+
 // Node http types spelled structurally so the package needs no @types/node
 // at the type level beyond these interfaces.
 export interface NodeIncomingMessage {
@@ -255,6 +303,8 @@ declare module '@deepseek-ai/cordis' {
     agents: HostAgentRegistry
     /** The host webserver route surface; required via `inject`. */
     webServer: HostWebServer
+    /** The host settings provider; required via `inject` (dsh 0.1.2+). */
+    settings: HostSettings
   }
   interface Events {
     /** Durable session facts broadcast by the host session store. */
@@ -270,6 +320,8 @@ declare module '@deepseek-ai/cordis' {
 export interface HostPluginContext {
   agents: HostAgentRegistry
   webServer: HostWebServer
+  /** The host settings provider, required via `inject` ('settings'). */
+  settings: HostSettings
   /** The host default-model service, when mounted ('agentDefaultModel'). */
   get(service: 'agentDefaultModel'): HostAgentDefaultModel | undefined
   /** The host LLM registry, when mounted ('llm'). */
